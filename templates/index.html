@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}总览 — Surge Monitor{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div style="display:flex;align-items:center;gap:12px">
+    <div class="page-title">全屋流量总览</div>
+    <button class="ai-btn" id="ai-btn">✨ AI 安全分析</button>
+  </div>
+  <div class="date-picker">
+    <div class="range-btns">
+      <button class="range-btn active" data-range="1">今天</button>
+      <button class="range-btn" data-range="7">近7天</button>
+      <button class="range-btn" data-range="30">近30天</button>
+      <button class="range-btn" data-range="month">本月</button>
+    </div>
+    <input type="date" id="date-start" value="{{ today }}">
+    <span class="sep">—</span>
+    <input type="date" id="date-end" value="{{ today }}">
+  </div>
+</div>
+
+<div class="cards" id="cards">
+  <div class="card purple"><div class="label">总流量</div><div class="value" id="c-total">—</div></div>
+  <div class="card blue"><div class="label">代理流量</div><div class="value" id="c-proxy">—</div></div>
+  <div class="card green"><div class="label">直连流量</div><div class="value" id="c-direct">—</div></div>
+  <div class="card orange"><div class="label">请求数</div><div class="value" id="c-req">—</div></div>
+  <div class="card"><div class="label">活跃设备</div><div class="value" id="c-dev">—</div></div>
+</div>
+
+<div class="panel" style="margin-bottom:16px">
+  <h3 id="trend-title">24小时流量趋势</h3>
+  <div id="chart-hourly" class="chart"></div>
+</div>
+
+<div class="grid2">
+  <div class="panel">
+    <h3>设备流量 TOP 10</h3>
+    <table>
+      <thead><tr><th>设备</th><th>流量</th><th></th></tr></thead>
+      <tbody id="tbl-devices"></tbody>
+    </table>
+  </div>
+  <div class="panel">
+    <h3>域名流量 TOP 15</h3>
+    <table>
+      <thead><tr><th>域名</th><th>策略</th><th>流量</th></tr></thead>
+      <tbody id="tbl-domains"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let hourlyChart = null;
+
+function initChart() {
+  hourlyChart = echarts.init(document.getElementById('chart-hourly'));
+}
+
+function renderTrend(data) {
+  document.getElementById('trend-title').textContent =
+    data.multi_day ? '每日流量趋势' : '24小时流量趋势';
+  hourlyChart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis', formatter: (params) =>
+      params[0].axisValue + '<br>' +
+      params.map(p => p.marker + p.seriesName + ': ' + fmtBytes(p.value)).join('<br>')
+    },
+    legend: { data: ['下载', '上传'], textStyle: { color: '#94a3b8' } },
+    grid: { left: 60, right: 20, top: 40, bottom: 30 },
+    xAxis: { type: 'category', data: data.labels,
+             axisLabel: { color: '#64748b', fontSize: 11 },
+             axisLine: { lineStyle: { color: '#2d3148' } } },
+    yAxis: { type: 'value', axisLabel: { color: '#64748b', fontSize: 11, formatter: v => fmtBytes(v) },
+             splitLine: { lineStyle: { color: '#1e2130' } } },
+    series: [
+      { name: '下载', type: 'bar', stack: 'traffic', data: data.download,
+        itemStyle: { color: '#6d28d9' }, emphasis: { itemStyle: { color: '#8b5cf6' } } },
+      { name: '上传', type: 'bar', stack: 'traffic', data: data.upload,
+        itemStyle: { color: '#1d4ed8' }, emphasis: { itemStyle: { color: '#3b82f6' } } },
+    ]
+  });
+}
+
+function renderDevices(devices) {
+  const max = devices[0]?.total_bytes || 1;
+  document.getElementById('tbl-devices').innerHTML = devices.map(d => {
+    const pct = (d.total_bytes / max * 100).toFixed(0);
+    const name = d.device_name || d.mac_address || '未知';
+    const link = d.mac_address ? `<a href="/device/${encodeURIComponent(d.mac_address)}">${name}</a>` : name;
+    return `<tr>
+      <td>${link}</td>
+      <td>${fmtBytes(d.total_bytes)}</td>
+      <td><div class="bar-cell"><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div></div></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderDomains(domains) {
+  document.getElementById('tbl-domains').innerHTML = domains.map(d => {
+    return `<tr>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${d.host}">${d.host}</td>
+      <td>${policyBadge(d.policy)}</td>
+      <td>${fmtBytes(d.total_bytes)}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function load(start, end) {
+  const res = await fetch('/api/overview' + rangeQuery(start, end));
+  const data = await res.json();
+
+  document.getElementById('c-total').textContent = fmtBytes(data.summary.total_bytes);
+  document.getElementById('c-proxy').textContent = fmtBytes(data.summary.proxy_bytes);
+  document.getElementById('c-direct').textContent = fmtBytes(data.summary.direct_bytes);
+  document.getElementById('c-req').textContent = fmtNum(data.summary.total_requests);
+  document.getElementById('c-dev').textContent = data.summary.active_devices;
+
+  renderTrend(data.trend);
+  renderDevices(data.top_devices);
+  renderDomains(data.top_domains);
+}
+
+initChart();
+const getRange = setupDateRange(load);
+const r = getRange();
+load(r.start, r.end);
+window.addEventListener('resize', () => hourlyChart && hourlyChart.resize());
+
+document.getElementById('ai-btn').addEventListener('click', () => {
+  const {start, end} = getRange();
+  openAiModal('全屋网络安全分析', '/api/ai/overview' + rangeQuery(start, end));
+});
+</script>
+{% endblock %}

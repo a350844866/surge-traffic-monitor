@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}策略组详情 — Surge Monitor{% endblock %}
+{% block content %}
+<a class="back-link" href="/policies">← 返回策略分析</a>
+
+<div class="page-header">
+  <div class="page-title">{{ name }}</div>
+  <div class="date-picker">
+    <div class="range-btns">
+      <button class="range-btn active" data-range="1">今天</button>
+      <button class="range-btn" data-range="7">近7天</button>
+      <button class="range-btn" data-range="30">近30天</button>
+      <button class="range-btn" data-range="month">本月</button>
+    </div>
+    <input type="date" id="date-start" value="{{ today }}">
+    <span class="sep">—</span>
+    <input type="date" id="date-end" value="{{ today }}">
+  </div>
+</div>
+
+<div class="cards" style="margin-bottom:16px">
+  <div class="card purple"><div class="label">总流量</div><div class="value" id="c-total">—</div></div>
+  <div class="card blue"><div class="label">下载</div><div class="value" id="c-down">—</div></div>
+  <div class="card green"><div class="label">上传</div><div class="value" id="c-up">—</div></div>
+  <div class="card orange"><div class="label">请求数</div><div class="value" id="c-req">—</div></div>
+</div>
+
+<div class="grid2">
+  <div class="panel">
+    <h3>使用该策略组的域名 TOP 50</h3>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <button class="sort-btn active" data-sort="bytes">按流量</button>
+      <button class="sort-btn" data-sort="requests">按请求数</button>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>域名</th><th>总流量</th><th>请求数</th></tr></thead>
+      <tbody id="tbl-domains"><tr><td colspan="4" class="loading">加载中...</td></tr></tbody>
+    </table>
+  </div>
+  <div class="panel">
+    <h3>使用该策略组的设备</h3>
+    <table>
+      <thead><tr><th>#</th><th>设备</th><th>总流量</th><th>请求数</th></tr></thead>
+      <tbody id="tbl-devices"><tr><td colspan="4" class="loading">加载中...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const groupName = {{ name | tojson }};
+let _domains = [];
+let _sortKey = 'bytes';
+
+function renderDomains(domains, sortKey) {
+  const sorted = [...domains].sort((a, b) =>
+    sortKey === 'requests' ? b.requests - a.requests : b.total_bytes - a.total_bytes
+  );
+  const max = sorted[0]?.[sortKey === 'requests' ? 'requests' : 'total_bytes'] || 1;
+  document.getElementById('tbl-domains').innerHTML = sorted.map((d, i) => {
+    const val = sortKey === 'requests' ? d.requests : d.total_bytes;
+    const pct = (val / max * 100).toFixed(0);
+    return `<tr>
+      <td style="color:#64748b;width:30px">${i+1}</td>
+      <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${d.host}">
+        <a href="/domain/${encodeURIComponent(d.host)}">${d.host}</a>
+      </td>
+      <td>
+        <div class="bar-cell">
+          <span style="min-width:68px">${fmtBytes(d.total_bytes)}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+        </div>
+      </td>
+      <td style="color:#64748b">${fmtNum(d.requests)}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="4" style="color:#64748b;text-align:center;padding:40px">暂无数据</td></tr>';
+}
+
+async function load(start, end) {
+  document.getElementById('tbl-domains').innerHTML = '<tr><td colspan="4" class="loading">加载中...</td></tr>';
+  document.getElementById('tbl-devices').innerHTML = '<tr><td colspan="4" class="loading">加载中...</td></tr>';
+
+  const res  = await fetch('/api/policy_group/' + encodeURIComponent(groupName) + rangeQuery(start, end));
+  const data = await res.json();
+
+  const s = data.summary || {};
+  document.getElementById('c-total').textContent = fmtBytes(s.total_bytes || 0);
+  document.getElementById('c-down').textContent  = fmtBytes(s.download || 0);
+  document.getElementById('c-up').textContent    = fmtBytes(s.upload || 0);
+  document.getElementById('c-req').textContent   = fmtNum(s.requests || 0);
+
+  _domains = data.domains || [];
+  renderDomains(_domains, _sortKey);
+
+  const maxDev = data.devices[0]?.total_bytes || 1;
+  document.getElementById('tbl-devices').innerHTML = data.devices.map((d, i) => {
+    const pct  = (d.total_bytes / maxDev * 100).toFixed(0);
+    const name = d.device_name || d.mac_address || '未知';
+    const link = d.mac_address
+      ? `<a href="/device/${encodeURIComponent(d.mac_address)}">${name}</a>`
+      : name;
+    return `<tr>
+      <td style="color:#64748b;width:30px">${i+1}</td>
+      <td>${link}</td>
+      <td>
+        <div class="bar-cell">
+          <span style="min-width:68px">${fmtBytes(d.total_bytes)}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+        </div>
+      </td>
+      <td style="color:#64748b">${fmtNum(d.requests)}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="4" style="color:#64748b;text-align:center;padding:40px">暂无数据</td></tr>';
+}
+
+// Sort buttons
+document.querySelectorAll('.sort-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _sortKey = btn.dataset.sort;
+    document.querySelectorAll('.sort-btn').forEach(b => b.classList.toggle('active', b === btn));
+    renderDomains(_domains, _sortKey);
+  });
+});
+
+const getRange = setupDateRange(load);
+const r = getRange();
+load(r.start, r.end);
+</script>
+{% endblock %}

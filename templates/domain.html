@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}域名详情 — Surge Monitor{% endblock %}
+{% block content %}
+<a class="back-link" href="/domains">← 返回域名列表</a>
+
+<div class="page-header">
+  <div class="page-title" style="font-size:16px;word-break:break-all">{{ host }}</div>
+  <div class="date-picker">
+    <div class="range-btns">
+      <button class="range-btn active" data-range="1">今天</button>
+      <button class="range-btn" data-range="7">近7天</button>
+      <button class="range-btn" data-range="30">近30天</button>
+      <button class="range-btn" data-range="month">本月</button>
+    </div>
+    <input type="date" id="date-start" value="{{ today }}">
+    <span class="sep">—</span>
+    <input type="date" id="date-end" value="{{ today }}">
+  </div>
+</div>
+
+<div class="cards" style="margin-bottom:16px">
+  <div class="card purple"><div class="label">总流量</div><div class="value" id="c-total">—</div></div>
+  <div class="card blue"><div class="label">下载</div><div class="value" id="c-down">—</div></div>
+  <div class="card green"><div class="label">上传</div><div class="value" id="c-up">—</div></div>
+  <div class="card orange"><div class="label">请求数</div><div class="value" id="c-req">—</div></div>
+  <div class="card"><div class="label">访问设备数</div><div class="value" id="c-dev">—</div></div>
+</div>
+
+<div class="panel">
+  <h3>访问设备列表</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>设备</th>
+        <th>策略</th>
+        <th>总流量</th>
+        <th>下载</th>
+        <th>上传</th>
+        <th>请求数</th>
+      </tr>
+    </thead>
+    <tbody id="tbl-devices"><tr><td colspan="7" class="loading">加载中...</td></tr></tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const host = {{ host | tojson }};
+
+async function load(start, end) {
+  document.getElementById('tbl-devices').innerHTML = '<tr><td colspan="7" class="loading">加载中...</td></tr>';
+  const res  = await fetch('/api/domain/' + encodeURIComponent(host) + rangeQuery(start, end));
+  const data = await res.json();
+
+  const s = data.summary || {};
+  document.getElementById('c-total').textContent = fmtBytes(s.total_bytes || 0);
+  document.getElementById('c-down').textContent  = fmtBytes(s.download || 0);
+  document.getElementById('c-up').textContent    = fmtBytes(s.upload || 0);
+  document.getElementById('c-req').textContent   = fmtNum(s.requests || 0);
+  document.getElementById('c-dev').textContent   = s.device_count || 0;
+
+  const max = data.devices[0]?.total_bytes || 1;
+  document.getElementById('tbl-devices').innerHTML = data.devices.map((d, i) => {
+    const pct  = (d.total_bytes / max * 100).toFixed(0);
+    const name = d.device_name || d.mac_address || '未知';
+    const link = d.mac_address
+      ? `<a href="/device/${encodeURIComponent(d.mac_address)}">${name}</a>`
+      : name;
+    return `<tr>
+      <td style="color:#64748b;width:36px">${i+1}</td>
+      <td>${link}</td>
+      <td>${policyBadge(d.policy)}</td>
+      <td>
+        <div class="bar-cell">
+          <span style="min-width:72px">${fmtBytes(d.total_bytes)}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+        </div>
+      </td>
+      <td style="color:#a78bfa">${fmtBytes(d.download)}</td>
+      <td style="color:#60a5fa">${fmtBytes(d.upload)}</td>
+      <td style="color:#64748b">${fmtNum(d.requests)}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" style="color:#64748b;text-align:center;padding:40px">暂无数据</td></tr>';
+}
+
+const getRange = setupDateRange(load);
+const r = getRange();
+load(r.start, r.end);
+</script>
+{% endblock %}

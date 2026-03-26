@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}策略分析 — Surge Monitor{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div class="page-title">代理策略分析</div>
+  <div class="date-picker">
+    <div class="range-btns">
+      <button class="range-btn active" data-range="1">今天</button>
+      <button class="range-btn" data-range="7">近7天</button>
+      <button class="range-btn" data-range="30">近30天</button>
+      <button class="range-btn" data-range="month">本月</button>
+    </div>
+    <input type="date" id="date-start" value="{{ today }}">
+    <span class="sep">—</span>
+    <input type="date" id="date-end" value="{{ today }}">
+  </div>
+</div>
+
+<!-- 主视图：策略规则组 -->
+<div class="grid2" style="margin-bottom:16px">
+  <div class="panel">
+    <h3>策略规则组流量占比</h3>
+    <div id="chart-pie" style="width:100%;height:340px"></div>
+  </div>
+  <div class="panel">
+    <h3>策略规则组排行</h3>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <button class="sort-btn active" data-sort="bytes">按流量</button>
+      <button class="sort-btn" data-sort="requests">按请求数</button>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>规则组</th><th>总流量</th><th>请求数</th><th>设备数</th></tr></thead>
+      <tbody id="tbl-groups"><tr><td colspan="5" class="loading">加载中...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 次要视图：具体节点 (折叠) -->
+<details class="panel" style="margin-bottom:16px">
+  <summary style="cursor:pointer;font-size:13px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em;list-style:none;display:flex;align-items:center;gap:6px">
+    <span id="details-arrow" style="transition:transform .2s">▶</span>
+    具体节点明细（负载均衡节点，供参考）
+  </summary>
+  <div style="margin-top:16px">
+    <div class="grid2" style="margin-bottom:0">
+      <div>
+        <table>
+          <thead><tr><th>节点</th><th>总流量</th><th>请求数</th><th>设备数</th></tr></thead>
+          <tbody id="tbl-nodes"><tr><td colspan="4" class="loading">加载中...</td></tr></tbody>
+        </table>
+      </div>
+      <div>
+        <table>
+          <thead><tr><th>节点</th><th>设备</th><th>流量</th></tr></thead>
+          <tbody id="tbl-node-devices"><tr><td colspan="3" class="loading">加载中...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</details>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let pieChart;
+let _groups = [];
+let _sortKey = 'bytes';
+
+function initChart() {
+  pieChart = echarts.init(document.getElementById('chart-pie'));
+}
+
+// Toggle arrow on details open/close
+document.querySelector('details').addEventListener('toggle', function(e) {
+  document.getElementById('details-arrow').style.transform = this.open ? 'rotate(90deg)' : '';
+});
+
+const COLORS = ['#8b5cf6','#3b82f6','#10b981','#f59e0b','#ef4444','#06b6d4','#ec4899',
+                '#64748b','#a16207','#0891b2','#7c3aed','#dc2626','#059669','#d97706'];
+
+function renderGroups(groups, sortKey) {
+  const sorted = [...groups].sort((a, b) =>
+    sortKey === 'requests' ? b.requests - a.requests : b.total_bytes - a.total_bytes
+  );
+  const max = sorted[0]?.[sortKey === 'requests' ? 'requests' : 'total_bytes'] || 1;
+
+  document.getElementById('tbl-groups').innerHTML = sorted.map((g, i) => {
+    const val = sortKey === 'requests' ? g.requests : g.total_bytes;
+    const pct = (val / max * 100).toFixed(0);
+    const isSystem = g.policy_group === '🎯 直连流量' || g.policy_group === '🛑 拦截/拒绝';
+    const nameCell = isSystem
+      ? `<span style="color:#94a3b8">${g.policy_group}</span>`
+      : `<a href="/policy_group/${encodeURIComponent(g.policy_group)}">${g.policy_group}</a>`;
+    return `<tr>
+      <td style="color:#64748b;width:30px">${i+1}</td>
+      <td>${nameCell}</td>
+      <td>
+        <div class="bar-cell">
+          <span style="min-width:68px;color:#e2e8f0">${fmtBytes(g.total_bytes)}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${COLORS[i % COLORS.length]}"></div></div>
+        </div>
+      </td>
+      <td style="color:#64748b">${fmtNum(g.requests)}</td>
+      <td style="color:#64748b">${g.devices}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderPie(groups) {
+  pieChart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'item', formatter: p =>
+      p.name + '<br>' + fmtBytes(p.value) + ' (' + p.percent + '%)'
+    },
+    legend: { type: 'scroll', orient: 'vertical', right: 0, top: 'middle',
+              textStyle: { color: '#94a3b8', fontSize: 12 } },
+    series: [{
+      type: 'pie', radius: ['38%', '68%'], center: ['38%', '50%'],
+      data: groups.map((g, i) => ({
+        name: g.policy_group,
+        value: g.total_bytes,
+        itemStyle: { color: COLORS[i % COLORS.length] }
+      })),
+      label: { show: false },
+      emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,.5)' } }
+    }]
+  });
+}
+
+async function load(start, end) {
+  const q = rangeQuery(start, end);
+  const [grpRes, polRes] = await Promise.all([
+    fetch('/api/policy_groups' + q),
+    fetch('/api/policies' + q),
+  ]);
+  _groups = await grpRes.json();
+  const polData = await polRes.json();
+  const policies      = polData.policies || [];
+  const policyDevices = polData.policy_devices || [];
+
+  renderPie(_groups);
+  renderGroups(_groups, _sortKey);
+
+  // Specific nodes table
+  const proxyNodes = policies.filter(p => p.policy !== 'DIRECT' && p.policy !== 'REJECT' && p.policy !== 'REJECT-DROP');
+  document.getElementById('tbl-nodes').innerHTML = proxyNodes.map(p => `
+    <tr>
+      <td style="color:#94a3b8;font-size:12px">${p.policy}</td>
+      <td style="color:#64748b">${fmtBytes(p.total_bytes)}</td>
+      <td style="color:#475569">${fmtNum(p.requests)}</td>
+      <td style="color:#475569">${p.devices}</td>
+    </tr>`).join('') || '<tr><td colspan="4" style="color:#475569;padding:20px;text-align:center">无代理流量</td></tr>';
+
+  document.getElementById('tbl-node-devices').innerHTML = policyDevices.map(r => `
+    <tr>
+      <td style="color:#94a3b8;font-size:12px">${r.policy}</td>
+      <td><a href="/device/${encodeURIComponent(r.mac_address)}">${r.device_name || r.mac_address}</a></td>
+      <td style="color:#64748b">${fmtBytes(r.total_bytes)}</td>
+    </tr>`).join('');
+}
+
+// Sort buttons
+document.querySelectorAll('.sort-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _sortKey = btn.dataset.sort;
+    document.querySelectorAll('.sort-btn').forEach(b => b.classList.toggle('active', b === btn));
+    renderGroups(_groups, _sortKey);
+  });
+});
+
+initChart();
+const getRange = setupDateRange(load);
+const r = getRange();
+load(r.start, r.end);
+window.addEventListener('resize', () => pieChart?.resize());
+</script>
+{% endblock %}

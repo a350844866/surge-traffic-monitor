@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Surge 全屋流量{% endblock %}</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+         background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+  nav { background: #1a1d27; border-bottom: 1px solid #2d3148; padding: 0 24px;
+        display: flex; align-items: center; gap: 8px; height: 52px; }
+  nav .brand { font-weight: 700; font-size: 16px; color: #a78bfa; margin-right: 16px; }
+  nav a { color: #94a3b8; text-decoration: none; padding: 6px 14px; border-radius: 6px;
+           font-size: 14px; transition: all .15s; }
+  nav a:hover, nav a.active { background: #2d3148; color: #e2e8f0; }
+  .container { max-width: 1280px; margin: 0 auto; padding: 24px; }
+  .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+  .page-title { font-size: 22px; font-weight: 600; color: #f1f5f9; }
+  .date-picker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .date-picker input[type=date] { background: #1a1d27; border: 1px solid #2d3148; color: #e2e8f0;
+                       padding: 6px 10px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+  .date-picker .sep { color: #475569; font-size: 13px; }
+  .range-btns { display: flex; gap: 4px; }
+  .range-btn { background: #1a1d27; border: 1px solid #2d3148; color: #94a3b8;
+               padding: 4px 10px; border-radius: 5px; font-size: 12px; cursor: pointer; transition: all .15s; }
+  .range-btn:hover { background: #2d3148; color: #e2e8f0; }
+  .range-btn.active { background: #312e81; border-color: #6d28d9; color: #a5b4fc; }
+  .sort-btn { background: #1a1d27; border: 1px solid #2d3148; color: #64748b;
+              padding: 3px 10px; border-radius: 5px; font-size: 12px; cursor: pointer; transition: all .15s; }
+  .sort-btn:hover { color: #94a3b8; }
+  .sort-btn.active { background: #1e2130; border-color: #475569; color: #e2e8f0; }
+  details.panel > summary { padding: 0; }
+  details.panel[open] > summary { margin-bottom: 0; }
+  /* AI Modal */
+  .ai-btn { display:inline-flex;align-items:center;gap:6px;background:#1e1b4b;border:1px solid #4c1d95;
+            color:#a78bfa;padding:7px 14px;border-radius:7px;font-size:13px;cursor:pointer;transition:all .15s; }
+  .ai-btn:hover { background:#2e1b6e;border-color:#7c3aed;color:#c4b5fd; }
+  .ai-btn:disabled { opacity:.5;cursor:not-allowed; }
+  .ai-modal-backdrop { display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;
+                       align-items:center;justify-content:center; }
+  .ai-modal-backdrop.open { display:flex; }
+  .ai-modal { background:#1a1d27;border:1px solid #2d3148;border-radius:14px;
+              width:min(760px,92vw);max-height:80vh;display:flex;flex-direction:column;
+              box-shadow:0 20px 60px rgba(0,0,0,.5); }
+  .ai-modal-head { padding:18px 22px;border-bottom:1px solid #2d3148;display:flex;
+                   align-items:center;justify-content:space-between; }
+  .ai-modal-head h4 { margin:0;font-size:15px;color:#e2e8f0; }
+  .ai-modal-close { background:none;border:none;color:#64748b;font-size:20px;cursor:pointer;line-height:1; }
+  .ai-modal-close:hover { color:#e2e8f0; }
+  .ai-modal-body { padding:20px 22px;overflow-y:auto;flex:1;line-height:1.7;font-size:14px;color:#cbd5e1; }
+  .ai-modal-body h1,.ai-modal-body h2,.ai-modal-body h3 { color:#e2e8f0;margin:.8em 0 .4em; }
+  .ai-modal-body strong { color:#e2e8f0; }
+  .ai-modal-body p { margin:.5em 0; }
+  .ai-modal-body ul,.ai-modal-body ol { padding-left:1.4em;margin:.4em 0; }
+  .ai-modal-body li { margin:.2em 0; }
+  .ai-modal-body code { background:#0f1117;padding:2px 6px;border-radius:4px;font-size:12px; }
+  .ai-cursor::after { content:'▌';animation:blink .7s step-end infinite; }
+  @keyframes blink { 50% { opacity:0; } }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: #1a1d27; border: 1px solid #2d3148; border-radius: 12px; padding: 20px; }
+  .card .label { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+  .card .value { font-size: 26px; font-weight: 700; color: #f1f5f9; }
+  .card .sub { font-size: 12px; color: #64748b; margin-top: 4px; }
+  .card.purple .value { color: #a78bfa; }
+  .card.blue .value { color: #60a5fa; }
+  .card.green .value { color: #34d399; }
+  .card.orange .value { color: #fb923c; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  @media (max-width: 900px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+  .panel { background: #1a1d27; border: 1px solid #2d3148; border-radius: 12px; padding: 20px; }
+  .panel h3 { font-size: 14px; font-weight: 600; color: #94a3b8; margin-bottom: 16px;
+               text-transform: uppercase; letter-spacing: .05em; }
+  .chart { width: 100%; height: 300px; }
+  .chart-tall { width: 100%; height: 380px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: #64748b; font-weight: 500; padding: 8px 12px;
+       border-bottom: 1px solid #2d3148; font-size: 11px; text-transform: uppercase; }
+  td { padding: 10px 12px; border-bottom: 1px solid #1e2130; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #20243a; }
+  td a { color: #a78bfa; text-decoration: none; }
+  td a:hover { text-decoration: underline; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px;
+           font-size: 11px; font-weight: 500; }
+  .badge-proxy { background: #312e81; color: #a5b4fc; }
+  .badge-direct { background: #14532d; color: #86efac; }
+  .badge-reject { background: #450a0a; color: #fca5a5; }
+  .bar-cell { display: flex; align-items: center; gap: 8px; }
+  .bar-track { flex: 1; height: 4px; background: #2d3148; border-radius: 2px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 2px; background: #6d28d9; }
+  .back-link { color: #64748b; font-size: 13px; text-decoration: none; margin-bottom: 16px; display: inline-block; }
+  .back-link:hover { color: #a78bfa; }
+  .loading { color: #64748b; font-size: 14px; padding: 40px; text-align: center; }
+</style>
+</head>
+<body>
+<nav>
+  <span class="brand">⚡ Surge Monitor</span>
+  <a href="/" id="nav-overview">总览</a>
+  <a href="/devices" id="nav-devices">设备</a>
+  <a href="/domains" id="nav-domains">域名</a>
+  <a href="/policies" id="nav-policies">策略</a>
+</nav>
+<div class="container">
+{% block content %}{% endblock %}
+</div>
+<script>
+// Highlight active nav
+const path = location.pathname;
+if (path === '/') document.getElementById('nav-overview').classList.add('active');
+else if (path.startsWith('/device')) document.getElementById('nav-devices').classList.add('active');
+else if (path.startsWith('/domains') || path.startsWith('/domain/')) document.getElementById('nav-domains').classList.add('active');
+else if (path.startsWith('/policies') || path.startsWith('/policy_group/')) document.getElementById('nav-policies').classList.add('active');
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length-1) { n /= 1024; i++; }
+  return n.toFixed(1) + ' ' + units[i];
+}
+function fmtNum(n) {
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return String(n);
+}
+// ── Date range helpers ──────────────────────────────────────────────────────
+function isoDate(d) {
+  return d.toISOString().slice(0, 10);
+}
+function setupDateRange(onChange) {
+  const startEl = document.getElementById('date-start');
+  const endEl   = document.getElementById('date-end');
+  const btns    = document.querySelectorAll('.range-btn');
+
+  function setActive(key) {
+    btns.forEach(b => b.classList.toggle('active', b.dataset.range === key));
+  }
+  function getRange() {
+    return { start: startEl.value, end: endEl.value };
+  }
+  function applyRange(startVal, endVal, btnKey) {
+    startEl.value = startVal;
+    endEl.value   = endVal;
+    setActive(btnKey || '');
+    onChange(startVal, endVal);
+  }
+
+  btns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const today = new Date();
+      const key   = btn.dataset.range;
+      if (key === '1') {
+        const d = isoDate(today);
+        applyRange(d, d, '1');
+      } else if (key === '7') {
+        const s = new Date(today); s.setDate(today.getDate() - 6);
+        applyRange(isoDate(s), isoDate(today), '7');
+      } else if (key === '30') {
+        const s = new Date(today); s.setDate(today.getDate() - 29);
+        applyRange(isoDate(s), isoDate(today), '30');
+      } else if (key === 'month') {
+        const s = new Date(today.getFullYear(), today.getMonth(), 1);
+        applyRange(isoDate(s), isoDate(today), 'month');
+      }
+    });
+  });
+
+  startEl.addEventListener('change', () => { setActive(''); onChange(startEl.value, endEl.value); });
+  endEl.addEventListener('change',   () => { setActive(''); onChange(startEl.value, endEl.value); });
+  return getRange;
+}
+function rangeQuery(start, end) {
+  return '?start=' + start + '&end=' + end;
+}
+
+function policyBadge(p) {
+  if (!p || p === 'DIRECT') return '<span class="badge badge-direct">直连</span>';
+  if (p === 'REJECT' || p === 'REJECT-DROP') return '<span class="badge badge-reject">REJECT</span>';
+  if (p === 'PROXY') return '<span class="badge badge-proxy">代理</span>';
+  return '<span class="badge badge-proxy">' + p + '</span>';
+}
+</script>
+<!-- AI Analysis Modal -->
+<div class="ai-modal-backdrop" id="ai-backdrop">
+  <div class="ai-modal">
+    <div class="ai-modal-head">
+      <h4 id="ai-modal-title">🤖 AI 分析</h4>
+      <button class="ai-modal-close" id="ai-modal-close">✕</button>
+    </div>
+    <div class="ai-modal-body" id="ai-modal-body"><span style="color:#64748b">分析中...</span></div>
+  </div>
+</div>
+
+<script>
+// Simple Markdown renderer (bold, headers, lists, inline code)
+function renderMarkdown(md) {
+  return md
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm,  '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm,   '<h1>$1</h1>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/^[-•] (.+)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>\n?)+/g, s => '<ul>' + s + '</ul>')
+    .replace(/\n{2,}/g, '</p><p>')
+    .replace(/\n/g, '<br>')
+    .replace(/^(.+)$/, '<p>$1</p>');
+}
+
+let _aiAbort = null;
+
+function openAiModal(title, url) {
+  document.getElementById('ai-modal-title').textContent = '🤖 ' + title;
+  const body = document.getElementById('ai-modal-body');
+  body.innerHTML = '<span style="color:#64748b">分析中...</span>';
+  document.getElementById('ai-backdrop').classList.add('open');
+
+  if (_aiAbort) _aiAbort();
+  let aborted = false;
+  _aiAbort = () => { aborted = true; };
+
+  let raw = '';
+  const es = new EventSource(url);
+  es.onmessage = e => {
+    if (aborted) { es.close(); return; }
+    if (e.data === '[DONE]') { es.close(); body.querySelector('.ai-cursor')?.classList.remove('ai-cursor'); return; }
+    try {
+      raw += JSON.parse(e.data);
+      body.innerHTML = '<span class="ai-cursor">' + renderMarkdown(raw) + '</span>';
+      body.scrollTop = body.scrollHeight;
+    } catch {}
+  };
+  es.onerror = () => {
+    es.close();
+    if (!aborted && !raw) body.innerHTML = '<span style="color:#f87171">连接失败，请稍后重试。</span>';
+  };
+}
+
+document.getElementById('ai-modal-close').addEventListener('click', () => {
+  document.getElementById('ai-backdrop').classList.remove('open');
+  if (_aiAbort) { _aiAbort(); _aiAbort = null; }
+});
+document.getElementById('ai-backdrop').addEventListener('click', e => {
+  if (e.target === document.getElementById('ai-backdrop')) document.getElementById('ai-modal-close').click();
+});
+</script>
+
+{% block scripts %}{% endblock %}
+</body>
+</html>

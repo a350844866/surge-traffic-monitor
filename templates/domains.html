@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}域名分析 — Surge Monitor{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div class="page-title">域名流量分析</div>
+  <div class="date-picker">
+    <div class="range-btns">
+      <button class="range-btn active" data-range="1">今天</button>
+      <button class="range-btn" data-range="7">近7天</button>
+      <button class="range-btn" data-range="30">近30天</button>
+      <button class="range-btn" data-range="month">本月</button>
+    </div>
+    <input type="date" id="date-start" value="{{ today }}">
+    <span class="sep">—</span>
+    <input type="date" id="date-end" value="{{ today }}">
+  </div>
+</div>
+
+<div class="panel">
+  <h3>全部域名流量排行</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>域名</th>
+        <th>策略</th>
+        <th>总流量</th>
+        <th>下载</th>
+        <th>上传</th>
+        <th>请求数</th>
+        <th>设备数</th>
+      </tr>
+    </thead>
+    <tbody id="tbl-domains"><tr><td colspan="8" class="loading">加载中...</td></tr></tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function load(start, end) {
+  document.getElementById('tbl-domains').innerHTML = '<tr><td colspan="8" class="loading">加载中...</td></tr>';
+  const res = await fetch('/api/domains' + rangeQuery(start, end));
+  const domains = await res.json();
+  const max = domains[0]?.total_bytes || 1;
+  document.getElementById('tbl-domains').innerHTML = domains.map((d, i) => {
+    const pct = (d.total_bytes / max * 100).toFixed(0);
+    return `<tr>
+      <td style="color:#64748b;width:36px">${i+1}</td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${d.host}"><a href="/domain/${encodeURIComponent(d.host)}">${d.host}</a></td>
+      <td>${policyBadge(d.policies)}</td>
+      <td>
+        <div class="bar-cell">
+          <span style="min-width:72px">${fmtBytes(d.total_bytes)}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+        </div>
+      </td>
+      <td style="color:#a78bfa">${fmtBytes(d.download)}</td>
+      <td style="color:#60a5fa">${fmtBytes(d.upload)}</td>
+      <td style="color:#64748b">${fmtNum(d.requests)}</td>
+      <td style="color:#64748b">${d.devices}</td>
+    </tr>`;
+  }).join('');
+}
+
+const getRange = setupDateRange(load);
+const r = getRange();
+load(r.start, r.end);
+</script>
+{% endblock %}

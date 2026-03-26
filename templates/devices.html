@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}设备 — Surge Monitor{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div class="page-title">设备流量</div>
+  <div class="date-picker">
+    <div class="range-btns">
+      <button class="range-btn active" data-range="1">今天</button>
+      <button class="range-btn" data-range="7">近7天</button>
+      <button class="range-btn" data-range="30">近30天</button>
+      <button class="range-btn" data-range="month">本月</button>
+    </div>
+    <input type="date" id="date-start" value="{{ today }}">
+    <span class="sep">—</span>
+    <input type="date" id="date-end" value="{{ today }}">
+  </div>
+</div>
+
+<div class="cards" style="margin-bottom:16px">
+  <div class="card purple"><div class="label">总流量</div><div class="value" id="c-total">—</div></div>
+  <div class="card blue"><div class="label">代理流量</div><div class="value" id="c-proxy">—</div></div>
+  <div class="card green"><div class="label">直连流量</div><div class="value" id="c-direct">—</div></div>
+  <div class="card orange"><div class="label">总请求数</div><div class="value" id="c-req">—</div></div>
+  <div class="card"><div class="label">活跃设备</div><div class="value" id="c-dev">—</div></div>
+</div>
+
+<div class="panel">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+    <h3 style="margin:0">全部设备</h3>
+    <div style="display:flex;gap:8px">
+      <button class="sort-btn active" data-sort="bytes">按流量</button>
+      <button class="sort-btn" data-sort="requests">按请求数</button>
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>设备</th>
+        <th>IP</th>
+        <th>厂商</th>
+        <th>总流量</th>
+        <th>代理</th>
+        <th>直连</th>
+        <th>请求数</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="tbl-devices"><tr><td colspan="9" class="loading">加载中...</td></tr></tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let _devices = [];
+let _sortKey = 'bytes';
+
+function renderDevices(devices, sortKey) {
+  const sorted = [...devices].sort((a, b) =>
+    sortKey === 'requests' ? b.requests - a.requests : b.total_bytes - a.total_bytes
+  );
+  const max = sorted[0]?.[sortKey === 'requests' ? 'requests' : 'total_bytes'] || 1;
+
+  document.getElementById('tbl-devices').innerHTML = sorted.map((d, i) => {
+    const val  = sortKey === 'requests' ? d.requests : d.total_bytes;
+    const pct  = (val / max * 100).toFixed(0);
+    const name = d.device_name || d.mac_address || '未知';
+    const link = d.mac_address
+      ? `<a href="/device/${encodeURIComponent(d.mac_address)}">${name}</a>`
+      : name;
+    const proxyPct = d.total_bytes ? (d.proxy_bytes / d.total_bytes * 100).toFixed(0) : 0;
+    return `<tr>
+      <td style="color:#64748b;width:30px">${i+1}</td>
+      <td style="font-weight:500">${link}</td>
+      <td style="color:#64748b;font-size:12px">${d.current_ip || ''}</td>
+      <td style="color:#475569;font-size:12px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.vendor || ''}</td>
+      <td>
+        <div class="bar-cell">
+          <span style="min-width:68px">${fmtBytes(d.total_bytes)}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+        </div>
+      </td>
+      <td style="color:#a78bfa">${fmtBytes(d.proxy_bytes)}</td>
+      <td style="color:#34d399">${fmtBytes(d.direct_bytes)}</td>
+      <td style="color:#64748b">${fmtNum(d.requests)}</td>
+      <td style="color:#475569;font-size:11px">${proxyPct}% 代理</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="9" style="color:#64748b;text-align:center;padding:40px">暂无数据</td></tr>';
+}
+
+async function load(start, end) {
+  document.getElementById('tbl-devices').innerHTML = '<tr><td colspan="9" class="loading">加载中...</td></tr>';
+  const res     = await fetch('/api/devices' + rangeQuery(start, end));
+  _devices = await res.json();
+
+  const total   = _devices.reduce((s, d) => s + d.total_bytes, 0);
+  const proxy   = _devices.reduce((s, d) => s + d.proxy_bytes, 0);
+  const direct  = _devices.reduce((s, d) => s + d.direct_bytes, 0);
+  const reqs    = _devices.reduce((s, d) => s + d.requests, 0);
+
+  document.getElementById('c-total').textContent  = fmtBytes(total);
+  document.getElementById('c-proxy').textContent  = fmtBytes(proxy);
+  document.getElementById('c-direct').textContent = fmtBytes(direct);
+  document.getElementById('c-req').textContent    = fmtNum(reqs);
+  document.getElementById('c-dev').textContent    = _devices.length;
+
+  renderDevices(_devices, _sortKey);
+}
+
+document.querySelectorAll('.sort-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _sortKey = btn.dataset.sort;
+    document.querySelectorAll('.sort-btn').forEach(b => b.classList.toggle('active', b === btn));
+    renderDevices(_devices, _sortKey);
+  });
+});
+
+const getRange = setupDateRange(load);
+const r = getRange();
+load(r.start, r.end);
+</script>
+{% endblock %}
