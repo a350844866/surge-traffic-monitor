@@ -7,12 +7,27 @@
     <span id="active-count" style="background:#7f1d1d;color:#fca5a5;font-size:12px;
           padding:2px 10px;border-radius:12px;display:none"></span>
   </div>
-  <button class="ai-btn" id="scan-btn">🔍 立即扫描</button>
+  <div style="display:flex;gap:8px">
+    <div style="display:flex;align-items:center;gap:0">
+      <button class="ai-btn" id="ai-review-btn"
+        title="由 AI 自动审查所有活跃告警，判断误报并自动标记安全"
+        style="border-radius:6px 0 0 6px;border-right:none">🤖 AI 审查</button>
+      <select id="ai-model-select"
+        style="background:#1a1d27;border:1px solid #4c1d95;color:#a78bfa;
+               padding:4px 6px;border-radius:0 6px 6px 0;font-size:12px;
+               cursor:pointer;outline:none;height:30px">
+        <option value="minimax/minimax-m2.7">MiniMax M2.7</option>
+        <option value="anthropic/claude-sonnet-4-6">Claude Sonnet 4.6</option>
+      </select>
+    </div>
+    <button class="ai-btn" id="enrich-btn" title="查询所有裸 IP 的归属机构（ASN），并自动白名单信任机构">🌐 ASN 分析</button>
+    <button class="ai-btn" id="scan-btn">🔍 立即扫描</button>
+  </div>
 </div>
 
 <!-- Filter bar -->
 <div class="panel" style="padding:12px 16px;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:12px;align-items:center">
-  <input id="filter-search" type="text" placeholder="搜索域名 / 原因..."
+  <input id="filter-search" type="text" placeholder="搜索域名 / 原因 / 机构..."
     style="background:#0f1117;border:1px solid #2d3148;color:#e2e8f0;padding:5px 12px;
            border-radius:6px;font-size:13px;width:220px;outline:none">
 
@@ -42,8 +57,8 @@
         <th style="width:70px;cursor:pointer" onclick="toggleSort('severity')">
           严重度 <span id="sort-severity"></span>
         </th>
-        <th>域名</th>
-        <th>检测原因</th>
+        <th>域名 / IP</th>
+        <th>检测原因 / 归属机构</th>
         <th style="width:60px">来源</th>
         <th style="width:70px;cursor:pointer" onclick="toggleSort('request_count')">
           请求数 <span id="sort-request_count"></span>
@@ -52,11 +67,72 @@
         <th style="width:120px;cursor:pointer" onclick="toggleSort('first_seen')">
           首次发现 <span id="sort-first_seen"></span>
         </th>
-        <th style="width:100px">操作</th>
+        <th style="width:130px">操作</th>
       </tr>
     </thead>
     <tbody id="tbl-sus"><tr><td colspan="8" class="loading">加载中...</td></tr></tbody>
   </table>
+</div>
+
+<!-- 白名单管理面板 -->
+<div style="margin-top:16px">
+  <div id="whitelist-toggle" style="cursor:pointer;color:#64748b;font-size:13px;
+       display:flex;align-items:center;gap:6px;padding:8px 0;user-select:none"
+       onclick="toggleWhitelist()">
+    <span id="whitelist-arrow">▶</span> 白名单管理（信任域名 / 信任机构）
+  </div>
+  <div id="whitelist-panel" style="display:none">
+
+    <!-- 信任域名 -->
+    <div class="panel" style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div style="color:#e2e8f0;font-size:14px;font-weight:600">信任父域名</div>
+        <div style="display:flex;gap:8px">
+          <input id="new-domain-pattern" type="text" placeholder="如: epicgames.com"
+            style="background:#0f1117;border:1px solid #2d3148;color:#e2e8f0;
+                   padding:4px 10px;border-radius:5px;font-size:12px;width:180px;outline:none">
+          <input id="new-domain-reason" type="text" placeholder="说明（可选）"
+            style="background:#0f1117;border:1px solid #2d3148;color:#e2e8f0;
+                   padding:4px 10px;border-radius:5px;font-size:12px;width:160px;outline:none">
+          <button onclick="addTrustedDomain()"
+            style="background:#1a2e1a;border:1px solid #166534;color:#4ade80;
+                   padding:4px 12px;border-radius:5px;font-size:12px;cursor:pointer">+ 添加</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>域名模式</th>
+            <th>说明</th>
+            <th style="width:140px">添加时间</th>
+            <th style="width:60px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="tbl-trusted-domains"><tr><td colspan="4" class="loading">加载中...</td></tr></tbody>
+      </table>
+    </div>
+
+    <!-- 信任 ASN -->
+    <div class="panel">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div style="color:#e2e8f0;font-size:14px;font-weight:600">信任机构（ASN）</div>
+        <div style="font-size:12px;color:#64748b">点击下方表格中的"信任此机构"按钮可直接添加</div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th style="width:90px">ASN</th>
+            <th>机构名称</th>
+            <th>说明</th>
+            <th style="width:80px">已白名单IP</th>
+            <th style="width:140px">添加时间</th>
+            <th style="width:60px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="tbl-trusted-asns"><tr><td colspan="6" class="loading">加载中...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
@@ -74,11 +150,16 @@
   .src-btn.active { border-color:#475569;color:#e2e8f0; }
   th[onclick] { user-select:none; }
   th[onclick]:hover { color:#e2e8f0; }
+  .trust-asn-btn {
+    background:#0c1a2e;border:1px solid #1e3a5f;color:#60a5fa;
+    padding:2px 8px;border-radius:4px;font-size:11px;cursor:pointer;white-space:nowrap;
+  }
+  .trust-asn-btn:hover { background:#1e3a5f; }
 </style>
 <script>
 let _data = [];
 let _sortKey = 'severity';
-let _sortAsc  = true;  // severity asc = high first (SEV_ORDER[high]=0)
+let _sortAsc  = true;
 
 const SEV_ORDER = {high:0, medium:1, low:2};
 const SEV_LABEL = {high:'高危', medium:'中危', low:'低危'};
@@ -120,8 +201,12 @@ function applyFilters(data, f) {
     if (!f.showDismissed && r.dismissed) return false;
     if (f.severity && r.severity !== f.severity) return false;
     if (f.source   && r.detection_type !== f.source) return false;
-    if (f.search && !r.host.toLowerCase().includes(f.search) &&
-        !(r.reason||'').toLowerCase().includes(f.search)) return false;
+    const q = f.search;
+    if (q) {
+      const haystack = [r.host, r.reason||'', r.ip_org||'', r.ip_asn||'', r.ip_country||'']
+        .join(' ').toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
     return true;
   });
 }
@@ -129,7 +214,6 @@ function applyFilters(data, f) {
 function sortRows(rows) {
   const k = _sortKey;
   return [...rows].sort((a, b) => {
-    // Always put dismissed at bottom
     if (a.dismissed !== b.dismissed) return a.dismissed - b.dismissed;
     let va = k === 'severity' ? (SEV_ORDER[a.severity]??2) : (a[k] ?? '');
     let vb = k === 'severity' ? (SEV_ORDER[b.severity]??2) : (b[k] ?? '');
@@ -150,15 +234,14 @@ function updateSortIcons() {
 }
 
 function toggleSort(key) {
-  if (_sortKey === key) {
-    _sortAsc = !_sortAsc;
-  } else {
-    _sortKey = key;
-    _sortAsc = key === 'severity';  // severity: asc = high first; others: desc by default
-    if (key !== 'severity') _sortAsc = false;
-  }
+  if (_sortKey === key) { _sortAsc = !_sortAsc; }
+  else { _sortKey = key; _sortAsc = key === 'severity'; }
   updateSortIcons();
   render();
+}
+
+function isIP(host) {
+  return /^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(host);
 }
 
 function render() {
@@ -183,18 +266,43 @@ function render() {
 
   document.getElementById('tbl-sus').innerHTML = rows.map(r => {
     const dim = r.dismissed ? 'opacity:.45;' : '';
+
+    // Second line for IP: show org/ASN info + trust button
+    let orgLine = '';
+    if (isIP(r.host) && r.ip_org) {
+      const flag = r.ip_country ? `[${r.ip_country}] ` : '';
+      orgLine = `<div style="color:#475569;font-size:11px;margin-top:2px">${flag}${r.ip_org}`;
+      if (r.ip_asn) {
+        orgLine += ` <span style="color:#334155">${r.ip_asn}</span>`;
+      }
+      orgLine += `</div>`;
+    } else if (isIP(r.host) && !r.ip_asn) {
+      orgLine = `<div style="color:#374151;font-size:11px;margin-top:2px">未查询 ASN（点击"ASN 分析"）</div>`;
+    }
+
+    // Trust button for IPs with known ASN (not yet dismissed / trusted)
+    let trustBtn = '';
+    if (isIP(r.host) && r.ip_asn && !r.dismissed) {
+      trustBtn = `<button class="trust-asn-btn" onclick="trustAsn('${esc(r.ip_asn)}','${esc(r.ip_org||r.ip_asn)}')"
+                    style="margin-left:6px">🛡 信任机构</button>`;
+    }
+
     const actionBtn = r.dismissed
       ? `<button onclick="restore('${esc(r.host)}')" class="icon-btn" style="font-size:12px;opacity:.8">↩ 恢复</button>`
       : `<button onclick="dismiss('${esc(r.host)}')" style="background:#1c0a0a;border:1px solid #7f1d1d;
            color:#fca5a5;padding:3px 10px;border-radius:5px;font-size:12px;cursor:pointer">✓ 安全</button>`;
+
     return `<tr style="${dim}">
       <td>${severityBadge(r.severity)}</td>
       <td style="font-family:monospace;font-size:13px">
         <a href="/domain/${encodeURIComponent(r.host)}" style="color:#93c5fd">${r.host}</a>
         ${r.dismissed?'<span style="color:#4ade80;font-size:11px;margin-left:6px">✓ 已安全</span>':''}
+        ${orgLine}
       </td>
-      <td style="color:#94a3b8;font-size:13px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-          title="${r.reason||''}">${r.reason||'—'}</td>
+      <td style="color:#94a3b8;font-size:13px;max-width:240px">
+        <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.reason||''}">${r.reason||'—'}</div>
+        ${trustBtn}
+      </td>
       <td>${sourceBadge(r.detection_type)}</td>
       <td style="color:#64748b;font-size:13px">${fmtNum(r.request_count)}</td>
       <td style="color:#64748b;font-size:13px">${r.device_count||0}</td>
@@ -204,7 +312,7 @@ function render() {
   }).join('');
 }
 
-function esc(s){ return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+function esc(s){ return (s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
 
 async function load() {
   const showDismissed = document.getElementById('show-dismissed').checked;
@@ -227,41 +335,155 @@ async function restore(host) {
   render();
 }
 
-// Filter bindings
-document.getElementById('filter-search').addEventListener('input', render);
-document.getElementById('show-dismissed').addEventListener('change', load);
-
-document.querySelectorAll('.sev-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.sev-btn').forEach(b=>b.classList.remove('active'));
-    btn.classList.add('active');
-    render();
+async function trustAsn(asn, orgName) {
+  if (!confirm(`将 ${orgName} (${asn}) 加入信任机构？\n来自该机构的所有裸 IP 将自动标记为安全。`)) return;
+  const res = await fetch('/api/trusted/asns', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({asn, org_name: orgName, reason: '用户从可疑列表手动添加'}),
   });
-});
+  const d = await res.json();
+  if (d.ok) {
+    alert(`已添加信任机构 ${asn}，自动白名单了 ${d.auto_dismissed} 个 IP`);
+    await load();
+    await loadTrustedAsns();
+  }
+}
 
-document.querySelectorAll('.src-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.src-btn').forEach(b=>b.classList.remove('active'));
-    btn.classList.add('active');
-    render();
-  });
+// ─── Scan & Enrich buttons ────────────────────────────────────────────────────
+
+document.getElementById('ai-review-btn').addEventListener('click', () => {
+  const activeCount = _data.filter(r=>!r.dismissed).length;
+  if (activeCount === 0) { alert('当前没有活跃的可疑条目。'); return; }
+  const model = document.getElementById('ai-model-select').value;
+  const modelLabel = document.getElementById('ai-model-select').selectedOptions[0].text;
+  openAiModal(`AI 审查（${activeCount} 条 · ${modelLabel}）`,
+              `/api/ai/suspicious/review?model=${encodeURIComponent(model)}`);
+  // Reload table when modal closes (AI may have dismissed entries)
+  const origClose = document.getElementById('ai-modal-close').onclick;
+  document.getElementById('ai-modal-close').addEventListener('click', load, {once: true});
+  document.getElementById('ai-backdrop').addEventListener('click', e => {
+    if (e.target === document.getElementById('ai-backdrop')) load();
+  }, {once: true});
 });
 
 document.getElementById('scan-btn').addEventListener('click', async () => {
   const btn = document.getElementById('scan-btn');
-  btn.disabled = true;
-  btn.textContent = '扫描中...';
+  btn.disabled = true; btn.textContent = '扫描中...';
   try {
     const res = await fetch('/api/suspicious/scan', {method:'POST'});
     const d = await res.json();
     btn.textContent = `🔍 立即扫描 (发现${d.new_flags}个)`;
     await load();
-  } catch(e) {
-    btn.textContent = '扫描失败';
-  } finally {
-    setTimeout(()=>{ btn.disabled=false; btn.textContent='🔍 立即扫描'; }, 3000);
-  }
+  } catch(e) { btn.textContent = '扫描失败'; }
+  finally { setTimeout(()=>{ btn.disabled=false; btn.textContent='🔍 立即扫描'; }, 3000); }
 });
+
+document.getElementById('enrich-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('enrich-btn');
+  btn.disabled = true; btn.textContent = '查询中...';
+  try {
+    const res = await fetch('/api/suspicious/enrich-ips', {method:'POST'});
+    const d = await res.json();
+    btn.textContent = `🌐 ASN 分析 (查询${d.enriched}个, 白名单${d.auto_dismissed}个)`;
+    await load();
+  } catch(e) { btn.textContent = 'ASN 查询失败'; }
+  finally { setTimeout(()=>{ btn.disabled=false; btn.textContent='🌐 ASN 分析'; }, 5000); }
+});
+
+// ─── Filter bindings ──────────────────────────────────────────────────────────
+
+document.getElementById('filter-search').addEventListener('input', render);
+document.getElementById('show-dismissed').addEventListener('change', load);
+document.querySelectorAll('.sev-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.sev-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active'); render();
+  });
+});
+document.querySelectorAll('.src-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.src-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active'); render();
+  });
+});
+
+// ─── Whitelist panel ──────────────────────────────────────────────────────────
+
+function toggleWhitelist() {
+  const panel = document.getElementById('whitelist-panel');
+  const arrow = document.getElementById('whitelist-arrow');
+  const visible = panel.style.display !== 'none';
+  panel.style.display = visible ? 'none' : 'block';
+  arrow.textContent = visible ? '▶' : '▼';
+  if (!visible) { loadTrustedDomains(); loadTrustedAsns(); }
+}
+
+async function loadTrustedDomains() {
+  const res = await fetch('/api/trusted/domains');
+  const rows = await res.json();
+  const tbody = document.getElementById('tbl-trusted-domains');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="4" style="color:#64748b;text-align:center">暂无记录</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `<tr>
+    <td style="font-family:monospace;font-size:13px;color:#93c5fd">*.${r.pattern}</td>
+    <td style="color:#94a3b8;font-size:13px">${r.reason||'—'}</td>
+    <td style="color:#475569;font-size:12px">${fmtDate(r.added_at)}</td>
+    <td><button onclick="deleteTrustedDomain('${esc(r.pattern)}')"
+          style="background:#1c0a0a;border:1px solid #7f1d1d;color:#fca5a5;
+                 padding:2px 8px;border-radius:4px;font-size:11px;cursor:pointer">删除</button></td>
+  </tr>`).join('');
+}
+
+async function addTrustedDomain() {
+  const pattern = document.getElementById('new-domain-pattern').value.trim();
+  const reason  = document.getElementById('new-domain-reason').value.trim();
+  if (!pattern) { alert('请输入域名模式'); return; }
+  const res = await fetch('/api/trusted/domains', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({pattern, reason}),
+  });
+  if ((await res.json()).ok) {
+    document.getElementById('new-domain-pattern').value = '';
+    document.getElementById('new-domain-reason').value = '';
+    await loadTrustedDomains();
+  }
+}
+
+async function deleteTrustedDomain(pattern) {
+  if (!confirm(`删除信任域名 ${pattern}？`)) return;
+  await fetch('/api/trusted/domains/'+encodeURIComponent(pattern), {method:'DELETE'});
+  await loadTrustedDomains();
+}
+
+async function loadTrustedAsns() {
+  const res = await fetch('/api/trusted/asns');
+  const rows = await res.json();
+  const tbody = document.getElementById('tbl-trusted-asns');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color:#64748b;text-align:center">暂无记录（点击上方可疑 IP 的"信任机构"按钮添加）</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `<tr>
+    <td style="font-family:monospace;font-size:13px;color:#60a5fa">${r.asn}</td>
+    <td style="color:#e2e8f0;font-size:13px">${r.org_name||'—'}</td>
+    <td style="color:#94a3b8;font-size:13px">${r.reason||'—'}</td>
+    <td style="color:#64748b;font-size:13px;text-align:center">${r.dismissed_count||0}</td>
+    <td style="color:#475569;font-size:12px">${fmtDate(r.added_at)}</td>
+    <td><button onclick="deleteTrustedAsn('${esc(r.asn)}')"
+          style="background:#1c0a0a;border:1px solid #7f1d1d;color:#fca5a5;
+                 padding:2px 8px;border-radius:4px;font-size:11px;cursor:pointer">删除</button></td>
+  </tr>`).join('');
+}
+
+async function deleteTrustedAsn(asn) {
+  if (!confirm(`删除信任机构 ${asn}？\n（已白名单的 IP 条目不会恢复）`)) return;
+  await fetch('/api/trusted/asns/'+encodeURIComponent(asn), {method:'DELETE'});
+  await loadTrustedAsns();
+}
 
 updateSortIcons();
 load();

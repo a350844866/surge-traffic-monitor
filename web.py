@@ -823,6 +823,165 @@ def ai_device(mac):
     return _stream_openrouter(prompt)
 
 
+@app.route("/api/ai/suspicious/review")
+def ai_suspicious_review():
+    """
+    AI reviews all active suspicious entries, auto-dismisses false positives,
+    and streams back a markdown summary.
+    Accepts ?model= to override the default model.
+    """
+    model = request.args.get("model", "").strip() or config.OPENROUTER_MODEL
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("""
+                SELECT sd.host, sd.severity, sd.reason, sd.detection_type,
+                       sd.request_count, sd.device_count,
+                       iac.asn, iac.org, iac.country
+                FROM suspicious_domains sd
+                LEFT JOIN ip_asn_cache iac
+                    ON iac.ip = REGEXP_SUBSTR(sd.host,
+                        '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+')
+                WHERE sd.dismissed = 0
+                ORDER BY FIELD(sd.severity,'high','medium','low'),
+                         sd.request_count DESC
+                LIMIT 150
+            """)
+            rows = cur.fetchall()
+    finally:
+        db.close()
+
+    def empty_stream(msg):
+        yield f"data: {json.dumps(msg)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    if not rows:
+        return Response(stream_with_context(empty_stream("✅ 当前没有活跃的可疑条目，无需审查。")),
+                        mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # Build entry list for AI prompt
+    entry_lines = []
+    for r in rows:
+        line = f"[{r['severity'].upper()}] {r['host']}"
+        if r.get("org"):
+            line += f"  机构:{r['org']}({r['asn']},{r['country']})"
+        line += f"  请求:{r['request_count']}次  设备:{r['device_count']}台  原因:{r['reason']}"
+        entry_lines.append(line)
+
+    prompt = f"""你是家庭网络安全助手，审查以下 {len(rows)} 条可疑告警，判断每条是误报（DISMISS）还是真正可疑（KEEP）。
+
+告警列表：
+{chr(10).join(entry_lines)}
+
+判断标准：
+- 知名大厂 CDN/服务节点（Apple、Google、Microsoft、腾讯、阿里、字节跳动、Spotify、Epic Games 等）→ DISMISS
+- 国内三大运营商（电信/联通/移动）及其云服务 → DISMISS
+- 大型云商（AWS、Azure、GCP、Cloudflare、Akamai、Hetzner、DigitalOcean、Linode 等）→ DISMISS
+- Telegram、WhatsApp 等知名 IM 服务器 IP → DISMISS
+- IP 归属可信机构且端口正常 → DISMISS
+- Shannon 熵高但属于大厂子域名命名惯例 → DISMISS
+- 完全随机 hash 子域名 + 非标准端口 + 无名公司 → KEEP
+- 境外不知名 VPS + 非标准端口 + 无明显用途 → KEEP
+- 域名明显仿冒知名品牌 → KEEP
+
+严格按以下 JSON 格式输出，不要输出任何其他内容：
+{{"decisions":[{{"host":"example.com:443","action":"DISMISS","reason":"简短理由"}},...],"summary":"中文总结，说明保留了哪些条目及原因"}}"""
+
+    # Call AI (non-streaming to get structured JSON)
+    try:
+        ai_resp = http_requests.post(
+            config.OPENROUTER_BASE_URL,
+            headers={
+                "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+            },
+            timeout=120,
+        )
+        ai_resp.raise_for_status()
+        content = ai_resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return Response(stream_with_context(empty_stream(f"[AI 请求失败] {e}")),
+                        mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # Parse AI JSON response
+    dismissed_list = []
+    kept_list = []
+    ai_summary = ""
+    parse_error = None
+    try:
+        raw = content
+        if "```json" in raw:
+            raw = raw.split("```json")[1].split("```")[0]
+        elif "```" in raw:
+            raw = raw.split("```")[1].split("```")[0]
+        parsed = json.loads(raw.strip())
+        ai_summary = parsed.get("summary", "")
+
+        db = get_db()
+        try:
+            for d in parsed.get("decisions", []):
+                host = d.get("host", "")
+                reason = (d.get("reason") or "")[:900]
+                if d.get("action") == "DISMISS":
+                    with db.cursor() as cur:
+                        cur.execute(
+                            "UPDATE suspicious_domains SET dismissed=1, dismissed_at=NOW(),"
+                            " notes=%s WHERE host=%s AND dismissed=0",
+                            (f"[AI白名单] {reason}", host),
+                        )
+                    if cur.rowcount > 0:
+                        dismissed_list.append((host, reason))
+                else:
+                    kept_list.append((host, reason))
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        parse_error = str(e)
+
+    # Build result markdown
+    md = "## 🤖 AI 安全审查结果\n\n"
+    md += f"共审查 **{len(rows)}** 条告警\n\n"
+    if dismissed_list:
+        md += f"### ✅ 已标记安全（{len(dismissed_list)} 条）\n"
+        for host, reason in dismissed_list[:30]:
+            md += f"- `{host}` — {reason}\n"
+        if len(dismissed_list) > 30:
+            md += f"- _...及其他 {len(dismissed_list) - 30} 条_\n"
+        md += "\n"
+    if kept_list:
+        md += f"### ⚠️ 保留观察（{len(kept_list)} 条）\n"
+        for host, reason in kept_list:
+            md += f"- `{host}` — {reason}\n"
+        md += "\n"
+    if ai_summary:
+        md += f"### 总结\n{ai_summary}\n"
+    if parse_error:
+        md += f"\n> ⚠️ JSON 解析出错: {parse_error}\n> 原始响应片段: {content[:300]}\n"
+
+    def stream_md(text):
+        # Stream in chunks for smooth typing effect
+        chunk = ""
+        for char in text:
+            chunk += char
+            if len(chunk) >= 4:
+                yield f"data: {json.dumps(chunk)}\n\n"
+                chunk = ""
+        if chunk:
+            yield f"data: {json.dumps(chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return Response(stream_with_context(stream_md(md)), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.route("/api/ai/overview")
 def ai_overview():
     start, end = _parse_range()
@@ -960,16 +1119,38 @@ def api_suspicious():
                     last_seen DESC
             """)
             rows = cur.fetchall()
+
+        # Enrich IP entries with ASN info from cache
+        ip_re = re.compile(r'^(\d{1,3}(?:\.\d{1,3}){3})(:\d+)?$')
+        ips = [ip_re.match(r["host"]).group(1) for r in rows if ip_re.match(r["host"])]
+        asn_map = {}
+        if ips:
+            placeholders = ",".join(["%s"] * len(ips))
+            with db.cursor() as cur:
+                cur.execute(
+                    f"SELECT ip, asn, org, country FROM ip_asn_cache WHERE ip IN ({placeholders})",
+                    ips,
+                )
+                for row in cur.fetchall():
+                    asn_map[row["ip"]] = row
     finally:
         db.close()
-    return jsonify([
-        {**r,
-         "first_seen": r["first_seen"].isoformat() if r["first_seen"] else None,
-         "last_seen":  r["last_seen"].isoformat()  if r["last_seen"]  else None,
-         "dismissed_at": r["dismissed_at"].isoformat() if r["dismissed_at"] else None,
-        }
-        for r in rows
-    ])
+
+    result = []
+    for r in rows:
+        item = {**r,
+                "first_seen": r["first_seen"].isoformat() if r["first_seen"] else None,
+                "last_seen":  r["last_seen"].isoformat()  if r["last_seen"]  else None,
+                "dismissed_at": r["dismissed_at"].isoformat() if r["dismissed_at"] else None,
+                }
+        m = ip_re.match(r["host"])
+        if m and m.group(1) in asn_map:
+            info = asn_map[m.group(1)]
+            item["ip_org"] = info["org"]
+            item["ip_asn"] = info["asn"]
+            item["ip_country"] = info["country"]
+        result.append(item)
+    return jsonify(result)
 
 
 @app.route("/api/suspicious/<path:host>/dismiss", methods=["POST"])
@@ -1014,6 +1195,196 @@ def api_suspicious_scan():
     finally:
         db.close()
     return jsonify({"ok": True, "new_flags": h + n})
+
+
+@app.route("/api/suspicious/enrich-ips", methods=["POST"])
+def api_suspicious_enrich_ips():
+    """Batch ASN lookup for all IP entries in suspicious_domains (no cache hit)."""
+    import time as _time
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT
+                    REGEXP_SUBSTR(host, '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+') AS ip
+                FROM suspicious_domains
+                WHERE host REGEXP '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+'
+                  AND REGEXP_SUBSTR(host, '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+')
+                      NOT IN (SELECT ip FROM ip_asn_cache
+                               WHERE queried_at > NOW() - INTERVAL 30 DAY)
+            """)
+            ips = [r["ip"] for r in cur.fetchall() if r["ip"]]
+    except Exception as e:
+        db.close()
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    enriched = 0
+    # ip-api.com batch: up to 100 IPs per request, ~45 req/min free
+    for i in range(0, len(ips), 100):
+        batch = ips[i:i + 100]
+        try:
+            resp = http_requests.post(
+                "http://ip-api.com/batch?fields=status,query,country,org,as",
+                json=[{"query": ip} for ip in batch],
+                timeout=10,
+            )
+            for item in resp.json():
+                if item.get("status") != "success":
+                    continue
+                ip = item["query"]
+                asn = (item.get("as") or "").split()[0]
+                org = item.get("org") or item.get("as") or ""
+                country = item.get("country") or ""
+                with db.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO ip_asn_cache (ip, asn, org, country) VALUES (%s,%s,%s,%s)"
+                        " ON DUPLICATE KEY UPDATE asn=VALUES(asn), org=VALUES(org),"
+                        " country=VALUES(country), queried_at=NOW()",
+                        (ip, asn, org, country),
+                    )
+                db.commit()
+                enriched += 1
+        except Exception as e:
+            log.warning(f"Batch ASN lookup error: {e}")
+        if i + 100 < len(ips):
+            _time.sleep(1.5)  # rate limit courtesy
+
+    # Auto-dismiss IPs whose ASN is now in trusted_asns
+    try:
+        with db.cursor() as cur:
+            cur.execute("""
+                UPDATE suspicious_domains sd
+                JOIN ip_asn_cache iac
+                    ON iac.ip = REGEXP_SUBSTR(sd.host, '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+')
+                JOIN trusted_asns ta ON ta.asn = iac.asn
+                SET sd.dismissed = 1,
+                    sd.dismissed_at = NOW(),
+                    sd.notes = CONCAT('[自动白名单] 信任机构: ', iac.org, ' (', iac.asn, ')')
+                WHERE sd.dismissed = 0
+                  AND sd.host REGEXP '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+'
+            """)
+            auto_dismissed = cur.rowcount
+        db.commit()
+    except Exception as e:
+        log.warning(f"Auto-dismiss by ASN failed: {e}")
+        auto_dismissed = 0
+    finally:
+        db.close()
+
+    return jsonify({"ok": True, "enriched": enriched, "auto_dismissed": auto_dismissed})
+
+
+# ─── Trusted domains / ASN management ────────────────────────────────────────
+
+@app.route("/api/trusted/domains", methods=["GET"])
+def api_trusted_domains_list():
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT id, pattern, reason, added_at FROM trusted_parent_domains ORDER BY added_at DESC")
+            rows = cur.fetchall()
+    finally:
+        db.close()
+    return jsonify([{**r, "added_at": r["added_at"].isoformat()} for r in rows])
+
+
+@app.route("/api/trusted/domains", methods=["POST"])
+def api_trusted_domains_add():
+    data = request.get_json(force=True, silent=True) or {}
+    pattern = (data.get("pattern") or "").strip().lower().lstrip(".")
+    reason  = (data.get("reason") or "").strip()[:512]
+    if not pattern:
+        return jsonify({"ok": False, "error": "pattern required"}), 400
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO trusted_parent_domains (pattern, reason) VALUES (%s, %s)"
+                " ON DUPLICATE KEY UPDATE reason=VALUES(reason)",
+                (pattern, reason),
+            )
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"ok": True, "pattern": pattern})
+
+
+@app.route("/api/trusted/domains/<path:pattern>", methods=["DELETE"])
+def api_trusted_domains_delete(pattern):
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM trusted_parent_domains WHERE pattern=%s", (pattern,))
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/trusted/asns", methods=["GET"])
+def api_trusted_asns_list():
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("""
+                SELECT ta.id, ta.asn, ta.org_name, ta.reason, ta.added_at,
+                    (SELECT COUNT(*) FROM suspicious_domains sd
+                     JOIN ip_asn_cache iac
+                         ON iac.ip = REGEXP_SUBSTR(sd.host, '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+')
+                     WHERE iac.asn = ta.asn AND sd.dismissed=1
+                    ) AS dismissed_count
+                FROM trusted_asns ta
+                ORDER BY ta.added_at DESC
+            """)
+            rows = cur.fetchall()
+    finally:
+        db.close()
+    return jsonify([{**r, "added_at": r["added_at"].isoformat()} for r in rows])
+
+
+@app.route("/api/trusted/asns", methods=["POST"])
+def api_trusted_asns_add():
+    data = request.get_json(force=True, silent=True) or {}
+    asn      = (data.get("asn") or "").strip().upper()
+    org_name = (data.get("org_name") or "").strip()[:255]
+    reason   = (data.get("reason") or "").strip()[:512]
+    if not asn:
+        return jsonify({"ok": False, "error": "asn required"}), 400
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO trusted_asns (asn, org_name, reason) VALUES (%s,%s,%s)"
+                " ON DUPLICATE KEY UPDATE org_name=VALUES(org_name), reason=VALUES(reason)",
+                (asn, org_name, reason),
+            )
+            # Auto-dismiss existing IPs from this ASN
+            cur.execute("""
+                UPDATE suspicious_domains sd
+                JOIN ip_asn_cache iac
+                    ON iac.ip = REGEXP_SUBSTR(sd.host, '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+')
+                SET sd.dismissed=1, sd.dismissed_at=NOW(),
+                    sd.notes=CONCAT('[自动白名单] 信任机构: ', iac.org, ' (', iac.asn, ')')
+                WHERE sd.dismissed=0 AND iac.asn=%s
+                  AND sd.host REGEXP '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+'
+            """, (asn,))
+            dismissed = cur.rowcount
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"ok": True, "asn": asn, "auto_dismissed": dismissed})
+
+
+@app.route("/api/trusted/asns/<asn>", methods=["DELETE"])
+def api_trusted_asns_delete(asn):
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM trusted_asns WHERE asn=%s", (asn.upper(),))
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"ok": True})
 
 
 # ─── Pages ────────────────────────────────────────────────────────────────────

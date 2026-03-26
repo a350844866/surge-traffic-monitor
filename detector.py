@@ -8,11 +8,97 @@ Two detection modes:
 
 import re
 import math
+import time
 import logging
 
 import config
 
 log = logging.getLogger("detector")
+
+# ─── Trusted list cache (loaded from DB, refreshed every 5 min) ───────────────
+
+_trusted_patterns_cache = []   # list of lowercase pattern strings
+_trusted_patterns_expires = 0
+_trusted_asns_cache = set()    # set of ASN strings like "AS4134"
+_trusted_asns_expires = 0
+_TRUSTED_CACHE_TTL = 300       # 5 minutes
+
+
+def _refresh_trusted_cache(db):
+    global _trusted_patterns_cache, _trusted_patterns_expires
+    global _trusted_asns_cache, _trusted_asns_expires
+    now = time.time()
+    if now < _trusted_patterns_expires:
+        return
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT pattern FROM trusted_parent_domains")
+            _trusted_patterns_cache = [r["pattern"].lower() for r in cur.fetchall()]
+            cur.execute("SELECT asn FROM trusted_asns")
+            _trusted_asns_cache = {r["asn"].upper() for r in cur.fetchall()}
+        _trusted_patterns_expires = now + _TRUSTED_CACHE_TTL
+        _trusted_asns_expires = now + _TRUSTED_CACHE_TTL
+    except Exception as e:
+        log.warning(f"Failed to refresh trusted cache: {e}")
+
+
+def _is_trusted_parent(host, db):
+    """Return (True, pattern) if host matches a trusted parent domain pattern."""
+    _refresh_trusted_cache(db)
+    h = _strip_port(host).lower().rstrip(".")
+    for pattern in _trusted_patterns_cache:
+        p = pattern.lower()
+        if h == p or h.endswith("." + p):
+            return True, pattern
+    return False, None
+
+
+def _get_asn_info(ip, db):
+    """
+    Return ASN info dict {asn, org, country} for an IP address.
+    Uses ip_asn_cache table; calls ip-api.com on cache miss.
+    Returns None on failure.
+    """
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT asn, org, country FROM ip_asn_cache WHERE ip=%s"
+                " AND queried_at > NOW() - INTERVAL 30 DAY", (ip,)
+            )
+            row = cur.fetchone()
+            if row:
+                return row
+    except Exception:
+        pass
+
+    try:
+        import requests as _req
+        resp = _req.get(
+            f"http://ip-api.com/json/{ip}?fields=status,country,org,as",
+            timeout=5,
+        )
+        data = resp.json()
+        if data.get("status") == "success":
+            result = {
+                "asn": (data.get("as") or "").split()[0],   # "AS4134 China..." → "AS4134"
+                "org": data.get("org") or data.get("as") or "",
+                "country": data.get("country") or "",
+            }
+            try:
+                with db.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO ip_asn_cache (ip, asn, org, country) VALUES (%s,%s,%s,%s)"
+                        " ON DUPLICATE KEY UPDATE asn=VALUES(asn), org=VALUES(org),"
+                        " country=VALUES(country), queried_at=NOW()",
+                        (ip, result["asn"], result["org"], result["country"]),
+                    )
+                db.commit()
+            except Exception:
+                pass
+            return result
+    except Exception as e:
+        log.debug(f"ASN lookup failed for {ip}: {e}")
+    return None
 
 # ─── Safe domain exclusions ───────────────────────────────────────────────────
 
@@ -157,8 +243,11 @@ def _check_heuristics(host):
     """
     h = _strip_port(host).lower().rstrip(".")
 
-    # Bare IP address (after port stripping)
+    # Bare IP address (after port stripping) — skip private/loopback ranges
     if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', h):
+        if (h.startswith("192.168.") or h.startswith("10.") or
+                h.startswith("172.16.") or h.startswith("127.") or h == "::1"):
+            return None, None
         return "medium", f"直接 IP 访问（{h}），绕过 DNS 解析"
 
     labels = h.split(".")
@@ -167,7 +256,7 @@ def _check_heuristics(host):
 
     # High Shannon entropy on longest label (DGA indicator)
     entropy = _shannon_entropy(longest_label)
-    if entropy > 3.5 and len(longest_label) >= 8:
+    if entropy > 4.5 and len(longest_label) >= 8:
         return "high", f"域名熵值过高({entropy:.2f})，疑似 DGA 生成域名"
 
     # Numeric/hex heavy label
@@ -219,23 +308,63 @@ def check_new_domains_heuristic(db):
         host = row["remote_host"]
         if _is_safe(host):
             continue
+
+        # Check trusted parent domain list (DB-managed whitelist)
+        trusted, pattern = _is_trusted_parent(host, db)
+        if trusted:
+            try:
+                with db.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO suspicious_domains
+                            (host, detection_type, reason, severity,
+                             request_count, device_count, dismissed, dismissed_at, notes)
+                        VALUES (%s, 'heuristic', '信任域名自动白名单', 'low',
+                                %s, %s, 1, NOW(), %s)
+                        ON DUPLICATE KEY UPDATE last_seen=NOW(),
+                            request_count=request_count + VALUES(request_count)
+                    """, (host, row["req_count"], row["dev_count"],
+                          f"[自动白名单] 信任域名: {pattern}"))
+                db.commit()
+            except Exception:
+                pass
+            continue
+
         severity, reason = _check_heuristics(host)
         if severity is None:
             continue
+
+        # For bare IPs: look up ASN and auto-dismiss if from trusted org
+        auto_dismiss = False
+        auto_notes = None
+        h = _strip_port(host).lower()
+        if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', h):
+            asn_info = _get_asn_info(h, db)
+            if asn_info:
+                _refresh_trusted_cache(db)
+                if asn_info["asn"] and asn_info["asn"].upper() in _trusted_asns_cache:
+                    auto_dismiss = True
+                    auto_notes = f"[自动白名单] 信任机构: {asn_info['org']} ({asn_info['asn']})"
+
         try:
             with db.cursor() as cur:
                 cur.execute("""
                     INSERT INTO suspicious_domains
-                        (host, detection_type, reason, severity, request_count, device_count)
-                    VALUES (%s, 'heuristic', %s, %s, %s, %s)
+                        (host, detection_type, reason, severity,
+                         request_count, device_count, dismissed, dismissed_at, notes)
+                    VALUES (%s, 'heuristic', %s, %s, %s, %s,
+                            %s, IF(%s=1, NOW(), NULL), %s)
                     ON DUPLICATE KEY UPDATE
                         last_seen=NOW(),
                         request_count=request_count + VALUES(request_count),
                         device_count=GREATEST(device_count, VALUES(device_count))
-                """, (host, reason, severity, row["req_count"], row["dev_count"]))
+                """, (host, reason, severity, row["req_count"], row["dev_count"],
+                      int(auto_dismiss), int(auto_dismiss), auto_notes))
             db.commit()
-            flagged += 1
-            log.info(f"heuristic flagged [{severity}] {host}: {reason}")
+            if auto_dismiss:
+                log.info(f"heuristic auto-dismissed [{severity}] {host}: {auto_notes}")
+            else:
+                flagged += 1
+                log.info(f"heuristic flagged [{severity}] {host}: {reason}")
         except Exception as e:
             log.warning(f"failed to insert heuristic flag for {host}: {e}")
 
