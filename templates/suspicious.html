@@ -7,26 +7,51 @@
     <span id="active-count" style="background:#7f1d1d;color:#fca5a5;font-size:12px;
           padding:2px 10px;border-radius:12px;display:none"></span>
   </div>
-  <div style="display:flex;gap:8px;align-items:center">
-    <label style="display:flex;align-items:center;gap:6px;color:#64748b;font-size:13px;cursor:pointer">
-      <input type="checkbox" id="show-dismissed" style="accent-color:#6d28d9">
-      显示已标记安全
-    </label>
-    <button class="ai-btn" id="scan-btn">🔍 立即扫描</button>
+  <button class="ai-btn" id="scan-btn">🔍 立即扫描</button>
+</div>
+
+<!-- Filter bar -->
+<div class="panel" style="padding:12px 16px;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+  <input id="filter-search" type="text" placeholder="搜索域名 / 原因..."
+    style="background:#0f1117;border:1px solid #2d3148;color:#e2e8f0;padding:5px 12px;
+           border-radius:6px;font-size:13px;width:220px;outline:none">
+
+  <div style="display:flex;gap:6px">
+    <button class="sev-btn active" data-sev="">全部</button>
+    <button class="sev-btn" data-sev="high" style="--c:#ef4444;--bg:#450a0a">高危</button>
+    <button class="sev-btn" data-sev="medium" style="--c:#f59e0b;--bg:#451a03">中危</button>
+    <button class="sev-btn" data-sev="low" style="--c:#64748b;--bg:#1e2130">低危</button>
   </div>
+
+  <div style="display:flex;gap:6px">
+    <button class="src-btn active" data-src="">全部来源</button>
+    <button class="src-btn" data-src="heuristic">规则</button>
+    <button class="src-btn" data-src="blocklist">黑名单</button>
+  </div>
+
+  <label style="display:flex;align-items:center;gap:6px;color:#64748b;font-size:13px;cursor:pointer;margin-left:auto">
+    <input type="checkbox" id="show-dismissed" style="accent-color:#6d28d9">
+    显示已标记安全
+  </label>
 </div>
 
 <div class="panel">
-  <table id="sus-table">
+  <table>
     <thead>
       <tr>
-        <th style="width:70px">严重度</th>
+        <th style="width:70px;cursor:pointer" onclick="toggleSort('severity')">
+          严重度 <span id="sort-severity"></span>
+        </th>
         <th>域名</th>
         <th>检测原因</th>
-        <th style="width:50px">来源</th>
-        <th style="width:70px">请求数</th>
+        <th style="width:60px">来源</th>
+        <th style="width:70px;cursor:pointer" onclick="toggleSort('request_count')">
+          请求数 <span id="sort-request_count"></span>
+        </th>
         <th style="width:60px">设备数</th>
-        <th style="width:120px">首次发现</th>
+        <th style="width:120px;cursor:pointer" onclick="toggleSort('first_seen')">
+          首次发现 <span id="sort-first_seen"></span>
+        </th>
         <th style="width:100px">操作</th>
       </tr>
     </thead>
@@ -36,8 +61,24 @@
 {% endblock %}
 
 {% block scripts %}
+<style>
+  .sev-btn, .src-btn {
+    background:#1a1d27;border:1px solid #2d3148;color:#64748b;
+    padding:3px 10px;border-radius:5px;font-size:12px;cursor:pointer;transition:all .15s;
+  }
+  .sev-btn:hover, .src-btn:hover { color:#94a3b8; }
+  .sev-btn.active[data-sev=""] { border-color:#475569;color:#e2e8f0; }
+  .sev-btn.active[data-sev="high"]   { background:var(--bg,#450a0a);border-color:var(--c,#ef4444);color:var(--c,#ef4444); }
+  .sev-btn.active[data-sev="medium"] { background:var(--bg,#451a03);border-color:var(--c,#f59e0b);color:var(--c,#f59e0b); }
+  .sev-btn.active[data-sev="low"]    { background:var(--bg,#1e2130);border-color:var(--c,#64748b);color:#94a3b8; }
+  .src-btn.active { border-color:#475569;color:#e2e8f0; }
+  th[onclick] { user-select:none; }
+  th[onclick]:hover { color:#e2e8f0; }
+</style>
 <script>
 let _data = [];
+let _sortKey = 'severity';
+let _sortAsc  = true;  // severity asc = high first (SEV_ORDER[high]=0)
 
 const SEV_ORDER = {high:0, medium:1, low:2};
 const SEV_LABEL = {high:'高危', medium:'中危', low:'低危'};
@@ -65,44 +106,95 @@ function fmtDate(s) {
   return s.replace('T',' ').slice(0,16);
 }
 
-function render(showDismissed) {
-  let rows = [..._data];
-  if (!showDismissed) rows = rows.filter(r => !r.dismissed);
-  rows.sort((a,b)=>{
-    if(a.dismissed !== b.dismissed) return a.dismissed - b.dismissed;
-    return (SEV_ORDER[a.severity]||2) - (SEV_ORDER[b.severity]||2);
+function getFilters() {
+  return {
+    search: document.getElementById('filter-search').value.trim().toLowerCase(),
+    severity: document.querySelector('.sev-btn.active').dataset.sev,
+    source:   document.querySelector('.src-btn.active').dataset.src,
+    showDismissed: document.getElementById('show-dismissed').checked,
+  };
+}
+
+function applyFilters(data, f) {
+  return data.filter(r => {
+    if (!f.showDismissed && r.dismissed) return false;
+    if (f.severity && r.severity !== f.severity) return false;
+    if (f.source   && r.detection_type !== f.source) return false;
+    if (f.search && !r.host.toLowerCase().includes(f.search) &&
+        !(r.reason||'').toLowerCase().includes(f.search)) return false;
+    return true;
   });
+}
+
+function sortRows(rows) {
+  const k = _sortKey;
+  return [...rows].sort((a, b) => {
+    // Always put dismissed at bottom
+    if (a.dismissed !== b.dismissed) return a.dismissed - b.dismissed;
+    let va = k === 'severity' ? (SEV_ORDER[a.severity]??2) : (a[k] ?? '');
+    let vb = k === 'severity' ? (SEV_ORDER[b.severity]??2) : (b[k] ?? '');
+    if (typeof va === 'string') va = va.toLowerCase();
+    if (typeof vb === 'string') vb = vb.toLowerCase();
+    if (va < vb) return _sortAsc ? -1 : 1;
+    if (va > vb) return _sortAsc ?  1 : -1;
+    return 0;
+  });
+}
+
+function updateSortIcons() {
+  ['severity','request_count','first_seen'].forEach(k => {
+    const el = document.getElementById('sort-'+k);
+    if (!el) return;
+    el.textContent = _sortKey === k ? (_sortAsc ? '↑' : '↓') : '';
+  });
+}
+
+function toggleSort(key) {
+  if (_sortKey === key) {
+    _sortAsc = !_sortAsc;
+  } else {
+    _sortKey = key;
+    _sortAsc = key === 'severity';  // severity: asc = high first; others: desc by default
+    if (key !== 'severity') _sortAsc = false;
+  }
+  updateSortIcons();
+  render();
+}
+
+function render() {
+  const f = getFilters();
+  const filtered = applyFilters(_data, f);
+  const rows = sortRows(filtered);
 
   const activeCount = _data.filter(r=>!r.dismissed).length;
   const badge = document.getElementById('active-count');
-  if(activeCount>0){
-    badge.textContent=activeCount+' 个活跃';
-    badge.style.display='';
+  if (activeCount > 0) {
+    badge.textContent = activeCount + ' 个活跃';
+    badge.style.display = '';
   } else {
-    badge.style.display='none';
+    badge.style.display = 'none';
   }
 
-  if(!rows.length){
-    document.getElementById('tbl-sus').innerHTML=
-      `<tr><td colspan="8" style="color:#64748b;text-align:center;padding:40px">
-        ${showDismissed?'暂无记录':'暂无可疑域名 ✓'}
-      </td></tr>`;
+  if (!rows.length) {
+    document.getElementById('tbl-sus').innerHTML =
+      `<tr><td colspan="8" style="color:#64748b;text-align:center;padding:40px">暂无记录</td></tr>`;
     return;
   }
 
   document.getElementById('tbl-sus').innerHTML = rows.map(r => {
-    const dimStyle = r.dismissed ? 'opacity:.45;' : '';
+    const dim = r.dismissed ? 'opacity:.45;' : '';
     const actionBtn = r.dismissed
-      ? `<button onclick="restore('${esc(r.host)}')" class="icon-btn" title="取消安全标记" style="font-size:12px;opacity:.8">↩ 恢复</button>`
+      ? `<button onclick="restore('${esc(r.host)}')" class="icon-btn" style="font-size:12px;opacity:.8">↩ 恢复</button>`
       : `<button onclick="dismiss('${esc(r.host)}')" style="background:#1c0a0a;border:1px solid #7f1d1d;
-           color:#fca5a5;padding:3px 10px;border-radius:5px;font-size:12px;cursor:pointer" title="标记为安全">✓ 安全</button>`;
-    return `<tr style="${dimStyle}">
+           color:#fca5a5;padding:3px 10px;border-radius:5px;font-size:12px;cursor:pointer">✓ 安全</button>`;
+    return `<tr style="${dim}">
       <td>${severityBadge(r.severity)}</td>
       <td style="font-family:monospace;font-size:13px">
         <a href="/domain/${encodeURIComponent(r.host)}" style="color:#93c5fd">${r.host}</a>
-        ${r.dismissed?'<span style="color:#4ade80;font-size:11px;margin-left:6px">✓ 已标记安全</span>':''}
+        ${r.dismissed?'<span style="color:#4ade80;font-size:11px;margin-left:6px">✓ 已安全</span>':''}
       </td>
-      <td style="color:#94a3b8;font-size:13px">${r.reason||'—'}</td>
+      <td style="color:#94a3b8;font-size:13px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+          title="${r.reason||''}">${r.reason||'—'}</td>
       <td>${sourceBadge(r.detection_type)}</td>
       <td style="color:#64748b;font-size:13px">${fmtNum(r.request_count)}</td>
       <td style="color:#64748b;font-size:13px">${r.device_count||0}</td>
@@ -116,44 +208,62 @@ function esc(s){ return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
 
 async function load() {
   const showDismissed = document.getElementById('show-dismissed').checked;
-  const url = '/api/suspicious' + (showDismissed?'?show_dismissed=1':'');
-  const res = await fetch(url);
+  const res = await fetch('/api/suspicious' + (showDismissed ? '?show_dismissed=1' : ''));
   _data = await res.json();
-  render(showDismissed);
+  render();
 }
 
 async function dismiss(host) {
   await fetch('/api/suspicious/'+encodeURIComponent(host)+'/dismiss', {method:'POST'});
   const item = _data.find(r=>r.host===host);
-  if(item) item.dismissed=1;
-  render(document.getElementById('show-dismissed').checked);
+  if (item) item.dismissed = 1;
+  render();
 }
 
 async function restore(host) {
   await fetch('/api/suspicious/'+encodeURIComponent(host)+'/restore', {method:'POST'});
   const item = _data.find(r=>r.host===host);
-  if(item) item.dismissed=0;
-  render(document.getElementById('show-dismissed').checked);
+  if (item) item.dismissed = 0;
+  render();
 }
 
-document.getElementById('show-dismissed').addEventListener('change', ()=>render(document.getElementById('show-dismissed').checked));
+// Filter bindings
+document.getElementById('filter-search').addEventListener('input', render);
+document.getElementById('show-dismissed').addEventListener('change', load);
 
-document.getElementById('scan-btn').addEventListener('click', async()=>{
-  const btn=document.getElementById('scan-btn');
-  btn.disabled=true;
-  btn.textContent='扫描中...';
-  try{
-    const res=await fetch('/api/suspicious/scan',{method:'POST'});
-    const d=await res.json();
-    btn.textContent=`🔍 立即扫描 (发现${d.new_flags}个)`;
+document.querySelectorAll('.sev-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.sev-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    render();
+  });
+});
+
+document.querySelectorAll('.src-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.src-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    render();
+  });
+});
+
+document.getElementById('scan-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('scan-btn');
+  btn.disabled = true;
+  btn.textContent = '扫描中...';
+  try {
+    const res = await fetch('/api/suspicious/scan', {method:'POST'});
+    const d = await res.json();
+    btn.textContent = `🔍 立即扫描 (发现${d.new_flags}个)`;
     await load();
-  }catch(e){
-    btn.textContent='扫描失败';
-  }finally{
-    setTimeout(()=>{btn.disabled=false;btn.textContent='🔍 立即扫描';},3000);
+  } catch(e) {
+    btn.textContent = '扫描失败';
+  } finally {
+    setTimeout(()=>{ btn.disabled=false; btn.textContent='🔍 立即扫描'; }, 3000);
   }
 });
 
+updateSortIcons();
 load();
 </script>
 {% endblock %}
