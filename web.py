@@ -225,6 +225,42 @@ def api_overview():
     })
 
 
+@app.route("/api/device/<path:mac>/rename", methods=["POST"])
+def api_device_rename(mac):
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "").strip()[:255]
+    if not name:
+        return jsonify({"error": "name required"}), 400
+
+    # Push to Surge first
+    try:
+        resp = http_requests.post(
+            f"http://127.0.0.1:{config.SURGE_API_LOCAL_PORT}/v1/devices",
+            headers={"X-Key": config.SURGE_API_KEY, "Content-Type": "application/json"},
+            json={"physicalAddress": mac, "name": name},
+            timeout=5,
+        )
+        if not resp.ok:
+            return jsonify({"error": f"Surge API error: {resp.text}"}), 502
+    except Exception as e:
+        return jsonify({"error": f"Surge unreachable: {e}"}), 502
+
+    # Update local DB
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO devices (mac_address, name) VALUES (%s, %s) "
+                "ON DUPLICATE KEY UPDATE name=%s",
+                (mac, name, name),
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    return jsonify({"ok": True, "name": name})
+
+
 @app.route("/api/device/<path:mac>")
 def api_device(mac):
     start, end = _parse_range()

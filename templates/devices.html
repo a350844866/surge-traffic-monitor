@@ -43,7 +43,7 @@
         <th>代理</th>
         <th>直连</th>
         <th>请求数</th>
-        <th></th>
+        <th>操作</th>
       </tr>
     </thead>
     <tbody id="tbl-devices"><tr><td colspan="9" class="loading">加载中...</td></tr></tbody>
@@ -55,6 +55,25 @@
 <script>
 let _devices = [];
 let _sortKey = 'bytes';
+
+function renameDevice(mac, currentName) {
+  const newName = prompt('设备重命名：', currentName);
+  if (!newName || newName.trim() === currentName) return;
+  fetch('/api/device/' + encodeURIComponent(mac) + '/rename', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: newName.trim()}),
+  }).then(r => r.json()).then(res => {
+    if (res.ok) {
+      // Update data and re-render
+      const dev = _devices.find(d => d.mac_address === mac);
+      if (dev) dev.device_name = res.name;
+      renderDevices(_devices, _sortKey);
+    } else {
+      alert('重命名失败: ' + (res.error || '未知错误'));
+    }
+  }).catch(() => alert('请求失败'));
+}
 
 function renderDevices(devices, sortKey) {
   const sorted = [...devices].sort((a, b) =>
@@ -70,6 +89,9 @@ function renderDevices(devices, sortKey) {
       ? `<a href="/device/${encodeURIComponent(d.mac_address)}">${name}</a>`
       : name;
     const proxyPct = d.total_bytes ? (d.proxy_bytes / d.total_bytes * 100).toFixed(0) : 0;
+    const renameBtn = d.mac_address
+      ? `<button onclick="renameDevice('${d.mac_address.replace(/'/g,"\\'")}','${name.replace(/'/g,"\\'")}');event.stopPropagation()" class="icon-btn" title="重命名">✏️</button>`
+      : '';
     return `<tr>
       <td style="color:#64748b;width:30px">${i+1}</td>
       <td style="font-weight:500">${link}</td>
@@ -84,7 +106,7 @@ function renderDevices(devices, sortKey) {
       <td style="color:#a78bfa">${fmtBytes(d.proxy_bytes)}</td>
       <td style="color:#34d399">${fmtBytes(d.direct_bytes)}</td>
       <td style="color:#64748b">${fmtNum(d.requests)}</td>
-      <td style="color:#475569;font-size:11px">${proxyPct}% 代理</td>
+      <td>${renameBtn}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="9" style="color:#64748b;text-align:center;padding:40px">暂无数据</td></tr>';
 }

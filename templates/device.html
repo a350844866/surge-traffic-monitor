@@ -6,6 +6,7 @@
 <div class="page-header">
   <div style="display:flex;align-items:center;gap:12px">
     <div class="page-title" id="dev-title">设备详情</div>
+    <button class="icon-btn" id="rename-btn" title="重命名设备" style="display:none">✏️</button>
     <button class="ai-btn" id="ai-btn">✨ AI 分析</button>
   </div>
   <div class="date-picker">
@@ -105,14 +106,19 @@ function renderDomains(domains) {
   }).join('');
 }
 
+let _currentDeviceName = '';
+let _currentDeviceIP = '';
+
 async function load(start, end) {
   const res  = await fetch('/api/device/' + encodeURIComponent(mac) + rangeQuery(start, end));
   const data = await res.json();
 
   if (data.device) {
     const d = data.device;
-    const name = d.name || d.dhcp_hostname || d.dns_name || mac;
-    document.getElementById('dev-title').textContent = name + (d.current_ip ? ' (' + d.current_ip + ')' : '');
+    _currentDeviceName = d.name || d.dhcp_hostname || d.dns_name || mac;
+    _currentDeviceIP = d.current_ip || '';
+    document.getElementById('dev-title').textContent = _currentDeviceName + (_currentDeviceIP ? ' (' + _currentDeviceIP + ')' : '');
+    document.getElementById('rename-btn').style.display = '';
   }
 
   const s = data.summary || {};
@@ -137,6 +143,23 @@ document.getElementById('ai-btn').addEventListener('click', () => {
   const devName = document.getElementById('dev-title').textContent;
   openAiModal('设备分析 — ' + devName,
     '/api/ai/device/' + encodeURIComponent(mac) + rangeQuery(start, end));
+});
+
+document.getElementById('rename-btn').addEventListener('click', () => {
+  const newName = prompt('设备重命名：', _currentDeviceName);
+  if (!newName || newName.trim() === _currentDeviceName) return;
+  fetch('/api/device/' + encodeURIComponent(mac) + '/rename', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: newName.trim()}),
+  }).then(r => r.json()).then(res => {
+    if (res.ok) {
+      _currentDeviceName = res.name;
+      document.getElementById('dev-title').textContent = _currentDeviceName + (_currentDeviceIP ? ' (' + _currentDeviceIP + ')' : '');
+    } else {
+      alert('重命名失败: ' + (res.error || '未知错误'));
+    }
+  }).catch(() => alert('请求失败'));
 });
 </script>
 {% endblock %}
