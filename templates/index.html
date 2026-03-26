@@ -27,6 +27,17 @@
   <div class="card"><div class="label">活跃设备</div><div class="value" id="c-dev">—</div></div>
 </div>
 
+<div id="suspicious-banner" style="display:none;background:#1c0a0a;border:1px solid #7f1d1d;
+     border-radius:12px;padding:14px 20px;margin-bottom:16px;
+     display:none;align-items:center;gap:12px">
+  <span style="font-size:20px">🚨</span>
+  <span style="flex:1;color:#fca5a5">发现 <strong id="sus-banner-count">0</strong> 个可疑域名
+    <span id="sus-banner-detail" style="color:#94a3b8;font-size:13px"></span>
+  </span>
+  <a href="/suspicious" style="color:#f87171;font-size:13px;text-decoration:none;
+     border:1px solid #7f1d1d;padding:4px 12px;border-radius:6px">查看详情 →</a>
+</div>
+
 <div class="panel" style="margin-bottom:16px">
   <h3 id="trend-title">24小时流量趋势</h3>
   <div id="chart-hourly" class="chart"></div>
@@ -127,6 +138,20 @@ const getRange = setupDateRange(load);
 const r = getRange();
 load(r.start, r.end);
 window.addEventListener('resize', () => hourlyChart && hourlyChart.resize());
+
+// Load suspicious domain banner
+fetch('/api/suspicious/count').then(r=>r.json()).then(d=>{
+  if(d.count>0){
+    document.getElementById('sus-banner-count').textContent=d.count;
+    const parts=[];
+    if(d.high) parts.push(`高危 ${d.high}`);
+    if(d.medium) parts.push(`中危 ${d.medium}`);
+    if(d.low) parts.push(`低危 ${d.low}`);
+    document.getElementById('sus-banner-detail').textContent='（'+parts.join('，')+'）';
+    const banner=document.getElementById('suspicious-banner');
+    banner.style.display='flex';
+  }
+}).catch(()=>{});
 
 document.getElementById('ai-btn').addEventListener('click', () => {
   const {start, end} = getRange();

@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}安全 — Surge Monitor{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div style="display:flex;align-items:center;gap:12px">
+    <div class="page-title">可疑域名</div>
+    <span id="active-count" style="background:#7f1d1d;color:#fca5a5;font-size:12px;
+          padding:2px 10px;border-radius:12px;display:none"></span>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <label style="display:flex;align-items:center;gap:6px;color:#64748b;font-size:13px;cursor:pointer">
+      <input type="checkbox" id="show-dismissed" style="accent-color:#6d28d9">
+      显示已标记安全
+    </label>
+    <button class="ai-btn" id="scan-btn">🔍 立即扫描</button>
+  </div>
+</div>
+
+<div class="panel">
+  <table id="sus-table">
+    <thead>
+      <tr>
+        <th style="width:70px">严重度</th>
+        <th>域名</th>
+        <th>检测原因</th>
+        <th style="width:50px">来源</th>
+        <th style="width:70px">请求数</th>
+        <th style="width:60px">设备数</th>
+        <th style="width:120px">首次发现</th>
+        <th style="width:100px">操作</th>
+      </tr>
+    </thead>
+    <tbody id="tbl-sus"><tr><td colspan="8" class="loading">加载中...</td></tr></tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let _data = [];
+
+const SEV_ORDER = {high:0, medium:1, low:2};
+const SEV_LABEL = {high:'高危', medium:'中危', low:'低危'};
+const SEV_COLOR = {high:'#ef4444', medium:'#f59e0b', low:'#64748b'};
+const SEV_BG    = {high:'#450a0a', medium:'#451a03', low:'#1e2130'};
+
+function severityBadge(s) {
+  return `<span style="background:${SEV_BG[s]};color:${SEV_COLOR[s]};border:1px solid ${SEV_COLOR[s]};
+    border-radius:4px;padding:1px 8px;font-size:11px;white-space:nowrap">${SEV_LABEL[s]||s}</span>`;
+}
+
+function sourceBadge(t) {
+  return t==='ai'
+    ? `<span style="background:#1e1b4b;color:#a78bfa;border:1px solid #4c1d95;
+        border-radius:4px;padding:1px 7px;font-size:11px">AI</span>`
+    : `<span style="background:#1a2a1a;color:#4ade80;border:1px solid #166534;
+        border-radius:4px;padding:1px 7px;font-size:11px">规则</span>`;
+}
+
+function fmtDate(s) {
+  if (!s) return '—';
+  return s.replace('T',' ').slice(0,16);
+}
+
+function render(showDismissed) {
+  let rows = [..._data];
+  if (!showDismissed) rows = rows.filter(r => !r.dismissed);
+  rows.sort((a,b)=>{
+    if(a.dismissed !== b.dismissed) return a.dismissed - b.dismissed;
+    return (SEV_ORDER[a.severity]||2) - (SEV_ORDER[b.severity]||2);
+  });
+
+  const activeCount = _data.filter(r=>!r.dismissed).length;
+  const badge = document.getElementById('active-count');
+  if(activeCount>0){
+    badge.textContent=activeCount+' 个活跃';
+    badge.style.display='';
+  } else {
+    badge.style.display='none';
+  }
+
+  if(!rows.length){
+    document.getElementById('tbl-sus').innerHTML=
+      `<tr><td colspan="8" style="color:#64748b;text-align:center;padding:40px">
+        ${showDismissed?'暂无记录':'暂无可疑域名 ✓'}
+      </td></tr>`;
+    return;
+  }
+
+  document.getElementById('tbl-sus').innerHTML = rows.map(r => {
+    const dimStyle = r.dismissed ? 'opacity:.45;' : '';
+    const actionBtn = r.dismissed
+      ? `<button onclick="restore('${esc(r.host)}')" class="icon-btn" title="取消安全标记" style="font-size:12px;opacity:.8">↩ 恢复</button>`
+      : `<button onclick="dismiss('${esc(r.host)}')" style="background:#1c0a0a;border:1px solid #7f1d1d;
+           color:#fca5a5;padding:3px 10px;border-radius:5px;font-size:12px;cursor:pointer" title="标记为安全">✓ 安全</button>`;
+    return `<tr style="${dimStyle}">
+      <td>${severityBadge(r.severity)}</td>
+      <td style="font-family:monospace;font-size:13px">
+        <a href="/domain/${encodeURIComponent(r.host)}" style="color:#93c5fd">${r.host}</a>
+        ${r.dismissed?'<span style="color:#4ade80;font-size:11px;margin-left:6px">✓ 已标记安全</span>':''}
+      </td>
+      <td style="color:#94a3b8;font-size:13px">${r.reason||'—'}</td>
+      <td>${sourceBadge(r.detection_type)}</td>
+      <td style="color:#64748b;font-size:13px">${fmtNum(r.request_count)}</td>
+      <td style="color:#64748b;font-size:13px">${r.device_count||0}</td>
+      <td style="color:#475569;font-size:12px">${fmtDate(r.first_seen)}</td>
+      <td>${actionBtn}</td>
+    </tr>`;
+  }).join('');
+}
+
+function esc(s){ return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+
+async function load() {
+  const showDismissed = document.getElementById('show-dismissed').checked;
+  const url = '/api/suspicious' + (showDismissed?'?show_dismissed=1':'');
+  const res = await fetch(url);
+  _data = await res.json();
+  render(showDismissed);
+}
+
+async function dismiss(host) {
+  await fetch('/api/suspicious/'+encodeURIComponent(host)+'/dismiss', {method:'POST'});
+  const item = _data.find(r=>r.host===host);
+  if(item) item.dismissed=1;
+  render(document.getElementById('show-dismissed').checked);
+}
+
+async function restore(host) {
+  await fetch('/api/suspicious/'+encodeURIComponent(host)+'/restore', {method:'POST'});
+  const item = _data.find(r=>r.host===host);
+  if(item) item.dismissed=0;
+  render(document.getElementById('show-dismissed').checked);
+}
+
+document.getElementById('show-dismissed').addEventListener('change', ()=>render(document.getElementById('show-dismissed').checked));
+
+document.getElementById('scan-btn').addEventListener('click', async()=>{
+  const btn=document.getElementById('scan-btn');
+  btn.disabled=true;
+  btn.textContent='扫描中...';
+  try{
+    const res=await fetch('/api/suspicious/scan',{method:'POST'});
+    const d=await res.json();
+    btn.textContent=`🔍 立即扫描 (发现${d.new_flags}个)`;
+    await load();
+  }catch(e){
+    btn.textContent='扫描失败';
+  }finally{
+    setTimeout(()=>{btn.disabled=false;btn.textContent='🔍 立即扫描';},3000);
+  }
+});
+
+load();
+</script>
+{% endblock %}

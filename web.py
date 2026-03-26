@@ -914,6 +914,108 @@ def ai_overview():
     return _stream_openrouter(prompt)
 
 
+# ─── Suspicious Domains API ───────────────────────────────────────────────────
+
+@app.route("/api/suspicious/count")
+def api_suspicious_count():
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(severity='high') AS high,
+                    SUM(severity='medium') AS medium,
+                    SUM(severity='low') AS low
+                FROM suspicious_domains
+                WHERE dismissed=0
+            """)
+            row = cur.fetchone()
+    finally:
+        db.close()
+    return jsonify({
+        "count": int(row["total"] or 0),
+        "high":  int(row["high"] or 0),
+        "medium": int(row["medium"] or 0),
+        "low":   int(row["low"] or 0),
+    })
+
+
+@app.route("/api/suspicious")
+def api_suspicious():
+    show_dismissed = request.args.get("show_dismissed") == "1"
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            where = "" if show_dismissed else "WHERE dismissed=0"
+            cur.execute(f"""
+                SELECT host, detection_type, reason, severity,
+                       first_seen, last_seen, request_count, device_count,
+                       dismissed, dismissed_at, notes
+                FROM suspicious_domains
+                {where}
+                ORDER BY
+                    FIELD(severity,'high','medium','low'),
+                    dismissed ASC,
+                    last_seen DESC
+            """)
+            rows = cur.fetchall()
+    finally:
+        db.close()
+    return jsonify([
+        {**r,
+         "first_seen": r["first_seen"].isoformat() if r["first_seen"] else None,
+         "last_seen":  r["last_seen"].isoformat()  if r["last_seen"]  else None,
+         "dismissed_at": r["dismissed_at"].isoformat() if r["dismissed_at"] else None,
+        }
+        for r in rows
+    ])
+
+
+@app.route("/api/suspicious/<path:host>/dismiss", methods=["POST"])
+def api_suspicious_dismiss(host):
+    data = request.get_json(force=True, silent=True) or {}
+    notes = (data.get("notes") or "").strip()[:1024] or None
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE suspicious_domains SET dismissed=1, dismissed_at=NOW(), notes=%s WHERE host=%s",
+                (notes, host),
+            )
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/suspicious/<path:host>/restore", methods=["POST"])
+def api_suspicious_restore(host):
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE suspicious_domains SET dismissed=0, dismissed_at=NULL WHERE host=%s",
+                (host,),
+            )
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/suspicious/scan", methods=["POST"])
+def api_suspicious_scan():
+    from detector import check_domains_ai, check_new_domains_heuristic
+    db = get_db()
+    try:
+        h = check_new_domains_heuristic(db)
+        n = check_domains_ai(db)
+    finally:
+        db.close()
+    return jsonify({"ok": True, "new_flags": h + n})
+
+
 # ─── Pages ────────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -949,6 +1051,11 @@ def policies():
 @app.route("/policy_group/<path:name>")
 def policy_group_detail(name):
     return render_template("policy_group.html", name=name, today=date.today().isoformat())
+
+
+@app.route("/suspicious")
+def suspicious():
+    return render_template("suspicious.html", today=date.today().isoformat())
 
 
 if __name__ == "__main__":

@@ -84,6 +84,25 @@ INSERT IGNORE INTO collector_state (key_name, value) VALUES
     ('last_sqlite_date', '20260321'),
     ('last_device_sync', '0');
 
+-- 可疑域名检测结果
+CREATE TABLE IF NOT EXISTS suspicious_domains (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    host            VARCHAR(512) NOT NULL,
+    detection_type  ENUM('heuristic','ai') NOT NULL DEFAULT 'heuristic',
+    reason          VARCHAR(1024) NOT NULL DEFAULT '',
+    severity        ENUM('low','medium','high') NOT NULL DEFAULT 'medium',
+    first_seen      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    request_count   INT UNSIGNED NOT NULL DEFAULT 0,
+    device_count    INT UNSIGNED NOT NULL DEFAULT 0,
+    dismissed       TINYINT(1) NOT NULL DEFAULT 0,
+    dismissed_at    DATETIME NULL,
+    notes           VARCHAR(1024) NULL,
+    UNIQUE INDEX uk_host (host(255)),
+    INDEX idx_dismissed (dismissed),
+    INDEX idx_severity (severity, dismissed)
+) ENGINE=InnoDB;
+
 -- 便捷视图：requests JOIN devices
 CREATE OR REPLACE VIEW request_details AS
 SELECT

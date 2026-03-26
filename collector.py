@@ -20,6 +20,7 @@ import pymysql.cursors
 
 sys.path.insert(0, os.path.dirname(__file__))
 import config
+from detector import check_new_domains_heuristic, check_domains_ai
 
 logging.basicConfig(
     level=logging.INFO,
@@ -328,6 +329,15 @@ def main():
         if time.time() - last_sqlite_sync >= config.SQLITE_SYNC_INTERVAL:
             sync_sqlite_daily(db)
             set_state(db, last_sqlite_sync_key, int(time.time()))
+
+        # Task 4: Heuristic suspicious domain check (every cycle)
+        check_new_domains_heuristic(db)
+
+        # Task 5: AI suspicious domain scan (periodic)
+        last_ai_scan = int(get_state(db, "last_ai_scan_time") or 0)
+        if time.time() - last_ai_scan >= getattr(config, "AI_SCAN_INTERVAL", 21600):
+            check_domains_ai(db)
+            set_state(db, "last_ai_scan_time", int(time.time()))
 
     except Exception as e:
         log.error(f"collector error: {e}", exc_info=True)
