@@ -225,6 +225,111 @@ def api_overview():
     })
 
 
+@app.route("/api/overview/hour")
+def api_overview_hour():
+    """Drill-down: top domains & devices for a specific hour or full day (sorted by upload)."""
+    date_str = request.args.get("date", date.today().isoformat())
+    hour_str = request.args.get("hour")
+    full_day = request.args.get("full_day") == "1" or hour_str is None
+
+    try:
+        hour = int(hour_str) if hour_str is not None else 0
+    except (ValueError, TypeError):
+        hour = 0
+
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            if full_day:
+                cur.execute("""
+                    SELECT
+                        remote_host AS host,
+                        COALESCE(SUM(out_bytes), 0) AS upload_bytes,
+                        COALESCE(SUM(in_bytes), 0) AS download_bytes,
+                        COUNT(*) AS requests,
+                        MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL
+                                 THEN 'DIRECT' ELSE 'PROXY' END) AS policy
+                    FROM requests
+                    WHERE DATE(start_date) = %s
+                      AND remote_host IS NOT NULL AND remote_host != ''
+                    GROUP BY remote_host
+                    ORDER BY upload_bytes DESC
+                    LIMIT 20
+                """, (date_str,))
+                top_domains = cur.fetchall()
+
+                cur.execute("""
+                    SELECT
+                        COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                        r.mac_address,
+                        COALESCE(SUM(r.out_bytes), 0) AS upload_bytes,
+                        COALESCE(SUM(r.in_bytes), 0) AS download_bytes,
+                        COUNT(*) AS requests
+                    FROM requests r
+                    LEFT JOIN devices d ON r.mac_address = d.mac_address
+                    WHERE DATE(r.start_date) = %s
+                    GROUP BY r.mac_address
+                    ORDER BY upload_bytes DESC
+                    LIMIT 10
+                """, (date_str,))
+                top_devices = cur.fetchall()
+            else:
+                cur.execute("""
+                    SELECT
+                        remote_host AS host,
+                        COALESCE(SUM(out_bytes), 0) AS upload_bytes,
+                        COALESCE(SUM(in_bytes), 0) AS download_bytes,
+                        COUNT(*) AS requests,
+                        MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL
+                                 THEN 'DIRECT' ELSE 'PROXY' END) AS policy
+                    FROM requests
+                    WHERE DATE(start_date) = %s AND HOUR(start_date) = %s
+                      AND remote_host IS NOT NULL AND remote_host != ''
+                    GROUP BY remote_host
+                    ORDER BY upload_bytes DESC
+                    LIMIT 20
+                """, (date_str, hour))
+                top_domains = cur.fetchall()
+
+                cur.execute("""
+                    SELECT
+                        COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                        r.mac_address,
+                        COALESCE(SUM(r.out_bytes), 0) AS upload_bytes,
+                        COALESCE(SUM(r.in_bytes), 0) AS download_bytes,
+                        COUNT(*) AS requests
+                    FROM requests r
+                    LEFT JOIN devices d ON r.mac_address = d.mac_address
+                    WHERE DATE(r.start_date) = %s AND HOUR(r.start_date) = %s
+                    GROUP BY r.mac_address
+                    ORDER BY upload_bytes DESC
+                    LIMIT 10
+                """, (date_str, hour))
+                top_devices = cur.fetchall()
+    finally:
+        db.close()
+
+    return jsonify({
+        "date": date_str,
+        "hour": hour,
+        "full_day": full_day,
+        "top_domains": [
+            {**r,
+             "upload_bytes": int(r["upload_bytes"]),
+             "download_bytes": int(r["download_bytes"]),
+             "requests": int(r["requests"])}
+            for r in top_domains
+        ],
+        "top_devices": [
+            {**r,
+             "upload_bytes": int(r["upload_bytes"]),
+             "download_bytes": int(r["download_bytes"]),
+             "requests": int(r["requests"])}
+            for r in top_devices
+        ],
+    })
+
+
 @app.route("/api/device/<path:mac>/rename", methods=["POST"])
 def api_device_rename(mac):
     data = request.get_json(force=True, silent=True) or {}

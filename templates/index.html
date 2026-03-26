@@ -31,16 +31,55 @@
      border-radius:12px;padding:14px 20px;margin-bottom:16px;
      display:none;align-items:center;gap:12px">
   <span style="font-size:20px">🚨</span>
-  <span style="flex:1;color:#fca5a5">发现 <strong id="sus-banner-count">0</strong> 个可疑域名
-    <span id="sus-banner-detail" style="color:#94a3b8;font-size:13px"></span>
-  </span>
+  <span style="flex:1;color:#fca5a5">发现 <strong id="sus-banner-count">0</strong> 个高危域名</span>
   <a href="/suspicious" style="color:#f87171;font-size:13px;text-decoration:none;
      border:1px solid #7f1d1d;padding:4px 12px;border-radius:6px">查看详情 →</a>
 </div>
 
 <div class="panel" style="margin-bottom:16px">
-  <h3 id="trend-title">24小时流量趋势</h3>
+  <h3 id="trend-title">24小时流量趋势 <span style="font-size:12px;color:#475569;font-weight:400">（点击柱子查看详情）</span></h3>
   <div id="chart-hourly" class="chart"></div>
+</div>
+
+<!-- Hour drill-down modal -->
+<div id="hour-modal-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:900;align-items:center;justify-content:center">
+  <div style="background:#1a1d27;border:1px solid #2d3148;border-radius:14px;width:min(820px,94vw);max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5)">
+    <div style="padding:16px 22px;border-bottom:1px solid #2d3148;display:flex;align-items:center;justify-content:space-between">
+      <div>
+        <span id="hour-modal-title" style="font-weight:600;font-size:16px;color:#f1f5f9"></span>
+        <span style="color:#475569;font-size:13px;margin-left:10px">按上传流量排序</span>
+      </div>
+      <button onclick="closeHourModal()" style="background:none;border:none;color:#64748b;font-size:20px;cursor:pointer;line-height:1">×</button>
+    </div>
+    <div style="overflow-y:auto;padding:18px 22px;flex:1">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px" id="hour-modal-grid">
+        <div>
+          <div style="font-size:13px;font-weight:600;color:#94a3b8;margin-bottom:10px;text-transform:uppercase;letter-spacing:.05em">域名 TOP 20</div>
+          <table style="width:100%;font-size:13px;border-collapse:collapse" id="hour-domains-tbl">
+            <thead><tr style="color:#475569">
+              <th style="text-align:left;padding:4px 6px;font-weight:500">域名</th>
+              <th style="text-align:left;padding:4px 6px;font-weight:500">策略</th>
+              <th style="text-align:right;padding:4px 6px;font-weight:500">上传</th>
+              <th style="text-align:right;padding:4px 6px;font-weight:500">下载</th>
+            </tr></thead>
+            <tbody id="hour-domains-body"></tbody>
+          </table>
+        </div>
+        <div>
+          <div style="font-size:13px;font-weight:600;color:#94a3b8;margin-bottom:10px;text-transform:uppercase;letter-spacing:.05em">设备 TOP 10</div>
+          <table style="width:100%;font-size:13px;border-collapse:collapse" id="hour-devices-tbl">
+            <thead><tr style="color:#475569">
+              <th style="text-align:left;padding:4px 6px;font-weight:500">设备</th>
+              <th style="text-align:right;padding:4px 6px;font-weight:500">上传</th>
+              <th style="text-align:right;padding:4px 6px;font-weight:500">下载</th>
+            </tr></thead>
+            <tbody id="hour-devices-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="hour-modal-loading" style="text-align:center;color:#475569;padding:40px 0">加载中…</div>
+    </div>
+  </div>
 </div>
 
 <div class="grid2">
@@ -64,14 +103,97 @@
 {% block scripts %}
 <script>
 let hourlyChart = null;
+let currentTrendData = null;
+let currentDateRange = null;
 
 function initChart() {
   hourlyChart = echarts.init(document.getElementById('chart-hourly'));
+  hourlyChart.on('click', onTrendBarClick);
 }
 
+function onTrendBarClick(params) {
+  if (!currentTrendData) return;
+  const label = currentTrendData.labels[params.dataIndex];
+  if (currentTrendData.multi_day) {
+    // multi-day: label is a date string "2026-03-26"
+    openHourModal(label, null);
+  } else {
+    // single-day: label is "H:00", date is currentDateRange.start
+    const hour = parseInt(label);
+    openHourModal(currentDateRange ? currentDateRange.start : null, hour);
+  }
+}
+
+async function openHourModal(date, hour) {
+  const backdrop = document.getElementById('hour-modal-backdrop');
+  const loading  = document.getElementById('hour-modal-loading');
+  const grid     = document.getElementById('hour-modal-grid');
+  backdrop.style.display = 'flex';
+  loading.style.display  = 'block';
+  grid.style.display     = 'none';
+
+  let url, title;
+  if (hour !== null && hour !== undefined) {
+    url   = `/api/overview/hour?date=${date}&hour=${hour}`;
+    title = `${date}  ${String(hour).padStart(2,'0')}:00 — ${String(hour+1).padStart(2,'0')}:00`;
+  } else {
+    url   = `/api/overview/hour?date=${date}&hour=0&full_day=1`;
+    title = `${date} 全天`;
+  }
+  document.getElementById('hour-modal-title').textContent = title;
+
+  try {
+    const res  = await fetch(url);
+    const data = await res.json();
+    renderHourDomains(data.top_domains);
+    renderHourDevices(data.top_devices);
+    loading.style.display = 'none';
+    grid.style.display    = 'grid';
+  } catch(e) {
+    loading.textContent = '加载失败';
+  }
+}
+
+function renderHourDomains(domains) {
+  document.getElementById('hour-domains-body').innerHTML = domains.length
+    ? domains.map(d => `<tr style="border-top:1px solid #1e2130">
+        <td style="padding:5px 6px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e2e8f0" title="${d.host}">${d.host}</td>
+        <td style="padding:5px 6px">${policyBadge(d.policy)}</td>
+        <td style="padding:5px 6px;text-align:right;color:#60a5fa">${fmtBytes(d.upload_bytes)}</td>
+        <td style="padding:5px 6px;text-align:right;color:#a78bfa">${fmtBytes(d.download_bytes)}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="4" style="padding:20px 6px;color:#475569;text-align:center">该时段无数据</td></tr>';
+}
+
+function renderHourDevices(devices) {
+  document.getElementById('hour-devices-body').innerHTML = devices.length
+    ? devices.map(d => {
+        const name = d.device_name || d.mac_address || '未知';
+        const link = d.mac_address ? `<a href="/device/${encodeURIComponent(d.mac_address)}" style="color:#e2e8f0;text-decoration:none">${name}</a>` : name;
+        return `<tr style="border-top:1px solid #1e2130">
+          <td style="padding:5px 6px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${link}</td>
+          <td style="padding:5px 6px;text-align:right;color:#60a5fa">${fmtBytes(d.upload_bytes)}</td>
+          <td style="padding:5px 6px;text-align:right;color:#a78bfa">${fmtBytes(d.download_bytes)}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="3" style="padding:20px 6px;color:#475569;text-align:center">该时段无数据</td></tr>';
+}
+
+function closeHourModal() {
+  document.getElementById('hour-modal-backdrop').style.display = 'none';
+}
+document.getElementById('hour-modal-backdrop').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeHourModal();
+});
+
 function renderTrend(data) {
-  document.getElementById('trend-title').textContent =
-    data.multi_day ? '每日流量趋势' : '24小时流量趋势';
+  currentTrendData = data;
+  const titleEl = document.getElementById('trend-title');
+  if (data.multi_day) {
+    titleEl.innerHTML = '每日流量趋势 <span style="font-size:12px;color:#475569;font-weight:400">（点击柱子查看当日详情）</span>';
+  } else {
+    titleEl.innerHTML = '24小时流量趋势 <span style="font-size:12px;color:#475569;font-weight:400">（点击柱子查看详情）</span>';
+  }
   hourlyChart.setOption({
     backgroundColor: 'transparent',
     tooltip: { trigger: 'axis', formatter: (params) =>
@@ -86,9 +208,9 @@ function renderTrend(data) {
     yAxis: { type: 'value', axisLabel: { color: '#64748b', fontSize: 11, formatter: v => fmtBytes(v) },
              splitLine: { lineStyle: { color: '#1e2130' } } },
     series: [
-      { name: '下载', type: 'bar', stack: 'traffic', data: data.download,
+      { name: '下载', type: 'bar', stack: 'traffic', data: data.download, cursor: 'pointer',
         itemStyle: { color: '#6d28d9' }, emphasis: { itemStyle: { color: '#8b5cf6' } } },
-      { name: '上传', type: 'bar', stack: 'traffic', data: data.upload,
+      { name: '上传', type: 'bar', stack: 'traffic', data: data.upload, cursor: 'pointer',
         itemStyle: { color: '#1d4ed8' }, emphasis: { itemStyle: { color: '#3b82f6' } } },
     ]
   });
@@ -119,6 +241,7 @@ function renderDomains(domains) {
 }
 
 async function load(start, end) {
+  currentDateRange = { start, end };
   const res = await fetch('/api/overview' + rangeQuery(start, end));
   const data = await res.json();
 
@@ -139,15 +262,10 @@ const r = getRange();
 load(r.start, r.end);
 window.addEventListener('resize', () => hourlyChart && hourlyChart.resize());
 
-// Load suspicious domain banner
+// Load suspicious domain banner — only show if there are high-risk domains
 fetch('/api/suspicious/count').then(r=>r.json()).then(d=>{
-  if(d.count>0){
-    document.getElementById('sus-banner-count').textContent=d.count;
-    const parts=[];
-    if(d.high) parts.push(`高危 ${d.high}`);
-    if(d.medium) parts.push(`中危 ${d.medium}`);
-    if(d.low) parts.push(`低危 ${d.low}`);
-    document.getElementById('sus-banner-detail').textContent='（'+parts.join('，')+'）';
+  if(d.high>0){
+    document.getElementById('sus-banner-count').textContent=d.high;
     const banner=document.getElementById('suspicious-banner');
     banner.style.display='flex';
   }
