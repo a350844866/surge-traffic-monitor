@@ -50,11 +50,14 @@ function severityBadge(s) {
 }
 
 function sourceBadge(t) {
-  return t==='ai'
-    ? `<span style="background:#1e1b4b;color:#a78bfa;border:1px solid #4c1d95;
-        border-radius:4px;padding:1px 7px;font-size:11px">AI</span>`
-    : `<span style="background:#1a2a1a;color:#4ade80;border:1px solid #166534;
-        border-radius:4px;padding:1px 7px;font-size:11px">规则</span>`;
+  if (t === 'blocklist')
+    return `<span style="background:#0c1a2e;color:#60a5fa;border:1px solid #1e40af;
+        border-radius:4px;padding:1px 7px;font-size:11px">黑名单</span>`;
+  if (t === 'ai' || t === 'spamhaus')
+    return `<span style="background:#1e1b4b;color:#a78bfa;border:1px solid #4c1d95;
+        border-radius:4px;padding:1px 7px;font-size:11px">AI</span>`;
+  return `<span style="background:#1a2a1a;color:#4ade80;border:1px solid #166534;
+      border-radius:4px;padding:1px 7px;font-size:11px">规则</span>`;
 }
 
 function fmtDate(s) {

@@ -84,11 +84,21 @@ INSERT IGNORE INTO collector_state (key_name, value) VALUES
     ('last_sqlite_date', '20260321'),
     ('last_device_sync', '0');
 
+-- 本地域名黑名单（每日从 URLhaus / OISD 下载，由 update_blocklist.py 维护）
+CREATE TABLE IF NOT EXISTS domain_blocklist (
+    domain   VARCHAR(512) NOT NULL,
+    source   VARCHAR(50)  NOT NULL DEFAULT 'oisd',
+    severity ENUM('low','medium','high') NOT NULL DEFAULT 'medium',
+    reason   VARCHAR(255) NOT NULL DEFAULT '',
+    PRIMARY KEY (domain(255)),
+    INDEX idx_source (source)
+) ENGINE=InnoDB ROW_FORMAT=COMPRESSED;
+
 -- 可疑域名检测结果
 CREATE TABLE IF NOT EXISTS suspicious_domains (
     id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     host            VARCHAR(512) NOT NULL,
-    detection_type  ENUM('heuristic','ai') NOT NULL DEFAULT 'heuristic',
+    detection_type  ENUM('heuristic','ai','spamhaus','blocklist') NOT NULL DEFAULT 'heuristic',
     reason          VARCHAR(1024) NOT NULL DEFAULT '',
     severity        ENUM('low','medium','high') NOT NULL DEFAULT 'medium',
     first_seen      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

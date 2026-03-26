@@ -1006,11 +1006,11 @@ def api_suspicious_restore(host):
 
 @app.route("/api/suspicious/scan", methods=["POST"])
 def api_suspicious_scan():
-    from detector import check_domains_ai, check_new_domains_heuristic
+    from detector import check_domains_blocklist, check_new_domains_heuristic
     db = get_db()
     try:
         h = check_new_domains_heuristic(db)
-        n = check_domains_ai(db)
+        n = check_domains_blocklist(db)
     finally:
         db.close()
     return jsonify({"ok": True, "new_flags": h + n})

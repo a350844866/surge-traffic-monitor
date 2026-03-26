@@ -3,15 +3,12 @@
 Suspicious domain detector for Surge Traffic Monitor.
 Two detection modes:
   - heuristic: fast rule-based checks on new domains (runs every collector cycle)
-  - ai: batch analysis via OpenRouter (runs every AI_SCAN_INTERVAL seconds)
+  - blocklist: local domain blocklist lookup (runs every collector cycle, last 60s window)
 """
 
 import re
 import math
-import json
 import logging
-
-import requests as http_requests
 
 import config
 
@@ -245,138 +242,80 @@ def check_new_domains_heuristic(db):
     return flagged
 
 
-# ─── AI batch detection (runs every AI_SCAN_INTERVAL) ─────────────────────────
+# ─── Local blocklist detection (runs every collector cycle) ───────────────────
 
-def check_domains_ai(db):
-    """Batch-analyze recent domains using OpenRouter AI."""
+def check_domains_blocklist(db):
+    """
+    Check domains seen in the last 60s against the local domain_blocklist table.
+    Fast SQL JOIN — no external calls.
+    """
     try:
         with db.cursor() as cur:
             cur.execute("""
                 SELECT remote_host,
                        COUNT(*) AS req_count,
-                       COUNT(DISTINCT mac_address) AS dev_count,
-                       SUM(in_bytes + out_bytes) AS total_bytes
+                       COUNT(DISTINCT mac_address) AS dev_count
                 FROM requests
-                WHERE start_date >= NOW() - INTERVAL 24 HOUR
+                WHERE start_date >= NOW() - INTERVAL 60 SECOND
                   AND remote_host IS NOT NULL
-                  AND remote_host NOT IN (
-                      SELECT host FROM suspicious_domains
-                  )
+                  AND remote_host NOT IN (SELECT host FROM suspicious_domains)
                 GROUP BY remote_host
-                ORDER BY req_count DESC
-                LIMIT 200
             """)
             rows = cur.fetchall()
     except Exception as e:
-        log.warning(f"ai scan query failed: {e}")
+        log.warning(f"blocklist query failed: {e}")
         return 0
 
     if not rows:
         return 0
 
-    # Filter out known safe domains
-    candidates = [r for r in rows if not _is_safe(r["remote_host"])]
-    if not candidates:
+    # Strip ports; build map stripped_domain → original row
+    host_map = {}
+    for row in rows:
+        stripped = _strip_port(row["remote_host"]).lower().rstrip(".")
+        if not _is_safe(row["remote_host"]) and stripped not in host_map:
+            host_map[stripped] = row
+
+    if not host_map:
         return 0
 
-    def fmt_bytes(n):
-        for unit in ("B", "KB", "MB", "GB"):
-            if n < 1024:
-                return f"{n:.0f}{unit}"
-            n /= 1024
-        return f"{n:.1f}TB"
-
-    domain_lines = "\n".join(
-        f"- {r['remote_host']} ({r['req_count']}次请求, {r['dev_count']}台设备, {fmt_bytes(r['total_bytes'] or 0)})"
-        for r in candidates[:150]
-    )
-
-    prompt = f"""你是家庭网络安全分析师。分析以下域名列表，找出可疑域名（恶意软件C2、追踪器、钓鱼、数据外泄、广告欺诈等）。
-
-注意：这是家庭网络，智能家居设备（小米、海尔等IoT）的正常域名请不要标记。只标记真正有安全风险的域名。
-
-请只返回 JSON 数组，不要有其他文字：
-[{{"host": "域名", "reason": "原因（中文）", "severity": "low|medium|high"}}]
-
-如果没有可疑域名，返回 []
-
-域名列表：
-{domain_lines}"""
-
+    # Batch lookup against local blocklist
+    placeholders = ",".join(["%s"] * len(host_map))
     try:
-        resp = http_requests.post(
-            config.OPENROUTER_BASE_URL,
-            headers={
-                "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": config.OPENROUTER_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"].strip()
+        with db.cursor() as cur:
+            cur.execute(
+                f"SELECT domain, severity, reason FROM domain_blocklist WHERE domain IN ({placeholders})",
+                list(host_map.keys()),
+            )
+            matches = cur.fetchall()
     except Exception as e:
-        log.warning(f"AI scan API call failed: {e}")
+        log.warning(f"blocklist lookup failed: {e}")
         return 0
-
-    # Parse JSON from AI response (may be wrapped in markdown code blocks)
-    json_str = content
-    md_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", content)
-    if md_match:
-        json_str = md_match.group(1)
-    else:
-        # Try to extract just the array portion
-        arr_match = re.search(r"\[[\s\S]*\]", content)
-        if arr_match:
-            json_str = arr_match.group(0)
-
-    try:
-        flagged_list = json.loads(json_str)
-        if not isinstance(flagged_list, list):
-            flagged_list = []
-    except Exception as e:
-        log.warning(f"AI response JSON parse failed: {e}\nRaw: {content[:500]}")
-        return 0
-
-    # Build a quick lookup for request counts
-    req_map = {r["remote_host"]: r for r in candidates}
 
     count = 0
-    for item in flagged_list:
-        host = (item.get("host") or "").strip()
-        reason = (item.get("reason") or "AI 检测").strip()[:1024]
-        severity = item.get("severity", "medium")
-        if severity not in ("low", "medium", "high"):
-            severity = "medium"
-        if not host:
-            continue
-        stats = req_map.get(host, {})
+    for m in matches:
+        row = host_map[m["domain"]]
+        host = row["remote_host"]
         try:
             with db.cursor() as cur:
                 cur.execute("""
                     INSERT INTO suspicious_domains
                         (host, detection_type, reason, severity, request_count, device_count)
-                    VALUES (%s, 'ai', %s, %s, %s, %s)
+                    VALUES (%s, 'blocklist', %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                         last_seen=NOW(),
                         reason=VALUES(reason),
                         severity=GREATEST(severity, VALUES(severity)),
                         request_count=GREATEST(request_count, VALUES(request_count)),
                         device_count=GREATEST(device_count, VALUES(device_count))
-                """, (host, reason, severity,
-                      int(stats.get("req_count") or 0),
-                      int(stats.get("dev_count") or 0)))
+                """, (host, m["reason"], m["severity"],
+                      int(row["req_count"]), int(row["dev_count"])))
             db.commit()
             count += 1
-            log.info(f"AI flagged [{severity}] {host}: {reason}")
+            log.info(f"blocklist flagged [{m['severity']}] {host}: {m['reason']}")
         except Exception as e:
-            log.warning(f"failed to insert AI flag for {host}: {e}")
+            log.warning(f"failed to insert blocklist flag for {host}: {e}")
 
-    log.info(f"AI scan complete: {count} domains flagged from {len(candidates)} candidates")
     return count
 
 
@@ -399,7 +338,7 @@ if __name__ == "__main__":
     if mode in ("heuristic", "both"):
         n = check_new_domains_heuristic(db)
         print(f"Heuristic: flagged {n}")
-    if mode in ("ai", "both"):
-        n = check_domains_ai(db)
-        print(f"AI: flagged {n}")
+    if mode in ("blocklist", "both"):
+        n = check_domains_blocklist(db)
+        print(f"Blocklist: flagged {n}")
     db.close()
