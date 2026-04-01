@@ -8,18 +8,12 @@
           padding:2px 10px;border-radius:12px;display:none"></span>
   </div>
   <div style="display:flex;gap:8px">
-    <div style="display:flex;align-items:center;gap:0">
-      <button class="ai-btn" id="ai-review-btn"
-        title="由 AI 自动审查所有活跃告警，判断误报并自动标记安全"
-        style="border-radius:6px 0 0 6px;border-right:none">🤖 AI 审查</button>
-      <select id="ai-model-select"
-        style="background:#1a1d27;border:1px solid #4c1d95;color:#a78bfa;
-               padding:4px 6px;border-radius:0 6px 6px 0;font-size:12px;
-               cursor:pointer;outline:none;height:30px">
-        <option value="minimax/minimax-m2.7">MiniMax M2.7</option>
-        <option value="anthropic/claude-sonnet-4-6">Claude Sonnet 4.6</option>
-      </select>
-    </div>
+    <button class="ai-btn" id="ai-review-btn"
+      title="由 AI 自动审查所有活跃告警，判断误报并自动标记安全">🤖 AI 审查</button>
+    <style>
+      #ai-review-btn.ai-running { opacity:.6; cursor:not-allowed; }
+      #ai-review-btn.ai-has-result { background:#1e3a2f; border-color:#22c55e; color:#4ade80; }
+    </style>
     <button class="ai-btn" id="enrich-btn" title="查询所有裸 IP 的归属机构（ASN），并自动白名单信任机构">🌐 ASN 分析</button>
     <button class="ai-btn" id="scan-btn">🔍 立即扫描</button>
   </div>
@@ -64,13 +58,16 @@
           请求数 <span id="sort-request_count"></span>
         </th>
         <th style="width:60px">设备数</th>
+        <th style="width:150px;cursor:pointer" onclick="toggleSort('persistence_score')">
+          持续性 <span id="sort-persistence_score"></span>
+        </th>
         <th style="width:120px;cursor:pointer" onclick="toggleSort('first_seen')">
           首次发现 <span id="sort-first_seen"></span>
         </th>
         <th style="width:130px">操作</th>
       </tr>
     </thead>
-    <tbody id="tbl-sus"><tr><td colspan="8" class="loading">加载中...</td></tr></tbody>
+    <tbody id="tbl-sus"><tr><td colspan="9" class="loading">加载中...</td></tr></tbody>
   </table>
 </div>
 
@@ -171,6 +168,54 @@ function severityBadge(s) {
     border-radius:4px;padding:1px 8px;font-size:11px;white-space:nowrap">${SEV_LABEL[s]||s}</span>`;
 }
 
+function fmtBytes(b) {
+  if (!b) return '';
+  if (b < 1024) return b + 'B';
+  if (b < 1024*1024) return (b/1024).toFixed(1) + 'K';
+  return (b/1024/1024).toFixed(1) + 'M';
+}
+
+function persistenceBadge(r) {
+  const parts = [];
+  const score = r.persistence_score || 0;
+  const days  = r.active_days || 0;
+  const consec = r.consecutive_days || 0;
+  const req7d  = r.requests_7d || 0;
+  const prevReq = r.requests_prev_7d || 0;
+  const dev7d  = r.device_count_7d || 0;
+  const bytes7d = r.bytes_7d || 0;
+
+  if (!days) return '<span style="color:#374151;font-size:11px">—</span>';
+
+  // 持续天数
+  const dayColor = days >= 7 ? '#f87171' : days >= 3 ? '#fbbf24' : '#94a3b8';
+  parts.push(`<span title="累计出现 ${days} 天" style="color:${dayColor};font-size:12px">📅 ${days}天</span>`);
+
+  // 连续天数（≥3天才显示）
+  if (consec >= 3) {
+    parts.push(`<span title="最长连续 ${consec} 天" style="color:#f87171;font-size:12px">🔁${consec}连</span>`);
+  }
+
+  // 趋势（近7天 vs 前7天）
+  if (prevReq > 0 && req7d > prevReq * 1.5) {
+    parts.push(`<span title="近7天 ${req7d} 次，前7天 ${prevReq} 次，流量上升" style="color:#f87171;font-size:12px">📈</span>`);
+  } else if (req7d > 0 && prevReq === 0) {
+    parts.push(`<span title="近7天 ${req7d} 次" style="color:#94a3b8;font-size:12px">近${req7d}次</span>`);
+  }
+
+  // 多设备
+  if (dev7d > 1) {
+    parts.push(`<span title="${dev7d} 台设备近7天访问" style="color:#f59e0b;font-size:12px">📡${dev7d}设备</span>`);
+  }
+
+  // 7天流量（>100K才显示）
+  if (bytes7d > 102400) {
+    parts.push(`<span title="近7天流量 ${fmtBytes(bytes7d)}" style="color:#64748b;font-size:11px">${fmtBytes(bytes7d)}</span>`);
+  }
+
+  return parts.join(' ');
+}
+
 function sourceBadge(t) {
   if (t === 'blocklist')
     return `<span style="background:#0c1a2e;color:#60a5fa;border:1px solid #1e40af;
@@ -226,7 +271,7 @@ function sortRows(rows) {
 }
 
 function updateSortIcons() {
-  ['severity','request_count','first_seen'].forEach(k => {
+  ['severity','request_count','persistence_score','first_seen'].forEach(k => {
     const el = document.getElementById('sort-'+k);
     if (!el) return;
     el.textContent = _sortKey === k ? (_sortAsc ? '↑' : '↓') : '';
@@ -306,6 +351,7 @@ function render() {
       <td>${sourceBadge(r.detection_type)}</td>
       <td style="color:#64748b;font-size:13px">${fmtNum(r.request_count)}</td>
       <td style="color:#64748b;font-size:13px">${r.device_count||0}</td>
+      <td style="line-height:1.8">${persistenceBadge(r)}</td>
       <td style="color:#475569;font-size:12px">${fmtDate(r.first_seen)}</td>
       <td>${actionBtn}</td>
     </tr>`;
@@ -350,22 +396,98 @@ async function trustAsn(asn, orgName) {
   }
 }
 
-// ─── Scan & Enrich buttons ────────────────────────────────────────────────────
+// ─── AI Review: async background job ─────────────────────────────────────────
 
-document.getElementById('ai-review-btn').addEventListener('click', () => {
+let _reviewPollTimer = null;
+
+function _setReviewBtn(status, jobId) {
+  const btn = document.getElementById('ai-review-btn');
+  btn.dataset.jobId = jobId || '';
+  if (status === 'running') {
+    btn.textContent = '⏳ AI 审查中…';
+    btn.disabled = true;
+    btn.classList.add('ai-running');
+    btn.classList.remove('ai-has-result');
+  } else if (status === 'done' || status === 'error') {
+    const label = status === 'done' ? '📋 查看AI审核结果' : '⚠️ AI 审查出错';
+    btn.textContent = label;
+    btn.disabled = false;
+    btn.classList.remove('ai-running');
+    btn.classList.add('ai-has-result');
+  } else {
+    btn.textContent = '🤖 AI 审查';
+    btn.disabled = false;
+    btn.classList.remove('ai-running', 'ai-has-result');
+  }
+}
+
+async function _checkReviewStatus() {
+  try {
+    const res = await fetch('/api/ai/suspicious/review/status');
+    const d = await res.json();
+    _setReviewBtn(d.status, d.job_id);
+    if (d.status === 'running') {
+      _reviewPollTimer = setTimeout(_checkReviewStatus, 5000);
+    } else if (d.status === 'done') {
+      // Reload table since AI may have dismissed entries
+      await load();
+    }
+  } catch(e) { /* network error, retry */ _reviewPollTimer = setTimeout(_checkReviewStatus, 10000); }
+}
+
+async function _showReviewResult(jobId) {
+  try {
+    const res = await fetch('/api/ai/suspicious/review/result/' + jobId);
+    const d = await res.json();
+    if (d.result_md) {
+      // Show result in AI modal using raw markdown display
+      const body = document.getElementById('ai-modal-body');
+      document.getElementById('ai-modal-title').textContent = '🤖 AI 审查结果';
+      body.innerHTML = '<span>' + renderMarkdown(d.result_md) + '</span>';
+      document.getElementById('ai-backdrop').classList.add('open');
+      // After closing modal, reset button to idle and reload table
+      document.getElementById('ai-modal-close').addEventListener('click', () => {
+        _setReviewBtn('idle', null);
+        load();
+      }, {once: true});
+      document.getElementById('ai-backdrop').addEventListener('click', e => {
+        if (e.target === document.getElementById('ai-backdrop')) {
+          _setReviewBtn('idle', null);
+          load();
+        }
+      }, {once: true});
+    }
+  } catch(e) { alert('获取审查结果失败: ' + e); }
+}
+
+document.getElementById('ai-review-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('ai-review-btn');
+  const jobId = btn.dataset.jobId;
+
+  // State C: has result → show it
+  if (btn.classList.contains('ai-has-result') && jobId) {
+    await _showReviewResult(jobId);
+    return;
+  }
+
+  // State A: idle → start new job
   const activeCount = _data.filter(r=>!r.dismissed).length;
   if (activeCount === 0) { alert('当前没有活跃的可疑条目。'); return; }
-  const model = document.getElementById('ai-model-select').value;
-  const modelLabel = document.getElementById('ai-model-select').selectedOptions[0].text;
-  openAiModal(`AI 审查（${activeCount} 条 · ${modelLabel}）`,
-              `/api/ai/suspicious/review?model=${encodeURIComponent(model)}`);
-  // Reload table when modal closes (AI may have dismissed entries)
-  const origClose = document.getElementById('ai-modal-close').onclick;
-  document.getElementById('ai-modal-close').addEventListener('click', load, {once: true});
-  document.getElementById('ai-backdrop').addEventListener('click', e => {
-    if (e.target === document.getElementById('ai-backdrop')) load();
-  }, {once: true});
+  const model = document.getElementById('global-ai-model').value;
+  try {
+    const res = await fetch('/api/ai/suspicious/review?model=' + encodeURIComponent(model), {method:'POST'});
+    const d = await res.json();
+    if (d.status === 'no_entries') { alert('当前没有活跃的可疑条目。'); return; }
+    _setReviewBtn('running', d.job_id);
+    if (_reviewPollTimer) clearTimeout(_reviewPollTimer);
+    _reviewPollTimer = setTimeout(_checkReviewStatus, 5000);
+  } catch(e) { alert('启动 AI 审查失败: ' + e); }
 });
+
+// On page load, restore button state from server
+_checkReviewStatus();
+
+// ─── Scan & Enrich buttons ────────────────────────────────────────────────────
 
 document.getElementById('scan-btn').addEventListener('click', async () => {
   const btn = document.getElementById('scan-btn');
@@ -486,6 +608,18 @@ async function deleteTrustedAsn(asn) {
 }
 
 updateSortIcons();
+
+// Pre-apply filters from URL params (e.g. ?sev=high from overview banner)
+(function() {
+  const params = new URLSearchParams(location.search);
+  const sev = params.get('sev');
+  if (sev) {
+    document.querySelectorAll('.sev-btn').forEach(b => b.classList.remove('active'));
+    const btn = document.querySelector(`.sev-btn[data-sev="${sev}"]`);
+    if (btn) btn.classList.add('active');
+  }
+})();
+
 load();
 </script>
 {% endblock %}

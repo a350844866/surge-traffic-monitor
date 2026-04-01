@@ -5,6 +5,7 @@ Polls Surge HTTP API and syncs SQLite daily files into MySQL.
 """
 
 import os
+import re
 import sys
 import time
 import sqlite3
@@ -15,12 +16,11 @@ from datetime import datetime, date, timedelta
 
 import json
 import requests
-import pymysql
-import pymysql.cursors
 
 sys.path.insert(0, os.path.dirname(__file__))
 import config
-from detector import check_new_domains_heuristic, check_domains_blocklist
+from db import get_db
+from detector import check_new_domains_heuristic, check_domains_blocklist, update_suspicious_stats
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,20 +33,6 @@ SURGE_API = f"http://127.0.0.1:{config.SURGE_API_LOCAL_PORT}"
 HEADERS = {"X-Key": config.SURGE_API_KEY}
 
 
-def get_db():
-    return pymysql.connect(
-        host=config.MYSQL_HOST,
-        port=config.MYSQL_PORT,
-        user=config.MYSQL_USER,
-        password=config.MYSQL_PASS,
-        database=config.MYSQL_DB,
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        connect_timeout=10,
-        autocommit=False,
-    )
-
-
 def get_state(db, key):
     with db.cursor() as cur:
         cur.execute("SELECT value FROM collector_state WHERE key_name=%s", (key,))
@@ -57,9 +43,9 @@ def get_state(db, key):
 def set_state(db, key, value):
     with db.cursor() as cur:
         cur.execute(
-            "INSERT INTO collector_state (key_name, value) VALUES (%s, %s) "
-            "ON DUPLICATE KEY UPDATE value=%s",
-            (key, str(value), str(value)),
+            "INSERT INTO collector_state (key_name, value) VALUES (%s, %s) AS new "
+            "ON DUPLICATE KEY UPDATE value=new.value",
+            (key, str(value)),
         )
     db.commit()
 
@@ -80,6 +66,16 @@ def poll_recent_requests(db):
         return 0
 
     last_id = int(get_state(db, "last_request_id") or 0)
+    current_max_id = max((int(r.get("id", 0) or 0) for r in requests_list), default=0)
+    if last_id and current_max_id and current_max_id < last_id:
+        log.warning(
+            "requests/recent id appears to have reset: current_max_id=%s < last_request_id=%s; resetting collector state",
+            current_max_id,
+            last_id,
+        )
+        last_id = 0
+        set_state(db, "last_request_id", 0)
+
     new_requests = [r for r in requests_list if r.get("id", 0) > last_id]
     if not new_requests:
         return 0
@@ -167,11 +163,11 @@ def sync_devices(db):
 
     sql = """
         INSERT INTO devices (mac_address, name, vendor, dhcp_hostname, dns_name, current_ip, last_seen)
-        VALUES (%(mac)s, %(name)s, %(vendor)s, %(dhcp_hostname)s, %(dns_name)s, %(current_ip)s, %(last_seen)s)
+        VALUES (%(mac)s, %(name)s, %(vendor)s, %(dhcp_hostname)s, %(dns_name)s, %(current_ip)s, %(last_seen)s) AS new
         ON DUPLICATE KEY UPDATE
-            name=VALUES(name), vendor=VALUES(vendor),
-            dhcp_hostname=VALUES(dhcp_hostname), dns_name=VALUES(dns_name),
-            current_ip=VALUES(current_ip), last_seen=VALUES(last_seen)
+            name=new.name, vendor=new.vendor,
+            dhcp_hostname=new.dhcp_hostname, dns_name=new.dns_name,
+            current_ip=new.current_ip, last_seen=new.last_seen
     """
     rows = []
     for d in device_list:
@@ -184,7 +180,6 @@ def sync_devices(db):
         # Prefer friendly name; fall back to IP if no name set
         name = d.get("name") or d.get("displayIPAddress") or ""
         # Only store if it looks like an actual name, not an IP
-        import re
         if re.match(r'^\d+\.\d+\.\d+\.\d+$', name):
             name = None  # Will show device_name as MAC in view
         current_ip = (d.get("dhcpLastIP") or d.get("displayIPAddress") or "")[:45] or None
@@ -214,18 +209,47 @@ def scp_sqlite(remote_date_str):
     remote_path = f"{config.SURGE_SQLITE_PATH}/{remote_date_str}.sqlite"
     tmp = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
     tmp.close()
+
     # Quote path with spaces for scp
     escaped_path = remote_path.replace(" ", "\\ ")
-    cmd = [
-        "sshpass", "-p", config.SURGE_SSH_PASS,
-        "scp",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "PreferredAuthentications=password",
-        "-o", "PubkeyAuthentication=no",
+    scp_cmd = ["scp", "-P", str(config.SURGE_SSH_PORT)]
+    if config.SURGE_SSH_KEY_PATH:
+        scp_cmd.extend(["-i", config.SURGE_SSH_KEY_PATH])
+    if config.SURGE_SSH_DISABLE_STRICT_HOST_KEY_CHECKING:
+        scp_cmd.extend([
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+        ])
+
+    password_file = config.SURGE_SSH_PASS_FILE
+    cleanup_password_file = False
+    if not config.SURGE_SSH_KEY_PATH and not password_file and config.SURGE_SSH_PASS:
+        pw_tmp = tempfile.NamedTemporaryFile(mode="w", delete=False)
+        pw_tmp.write(config.SURGE_SSH_PASS)
+        pw_tmp.write("\n")
+        pw_tmp.close()
+        os.chmod(pw_tmp.name, 0o600)
+        password_file = pw_tmp.name
+        cleanup_password_file = True
+    if password_file and not config.SURGE_SSH_KEY_PATH:
+        scp_cmd.extend([
+            "-o", "PreferredAuthentications=password",
+            "-o", "PubkeyAuthentication=no",
+        ])
+
+    scp_cmd.extend([
         f"{config.SURGE_SSH_USER}@{config.SURGE_HOST}:{escaped_path}",
         tmp.name,
-    ]
-    result = subprocess.run(cmd, capture_output=True, timeout=30)
+    ])
+    if password_file and not config.SURGE_SSH_KEY_PATH:
+        scp_cmd = ["sshpass", "-f", password_file, *scp_cmd]
+
+    try:
+        result = subprocess.run(scp_cmd, capture_output=True, timeout=30)
+    finally:
+        if cleanup_password_file:
+            os.unlink(password_file)
+
     if result.returncode != 0:
         os.unlink(tmp.name)
         return None
@@ -253,11 +277,12 @@ def import_sqlite(db, local_path, traffic_date):
             (traffic_date, host, device_path, policy, interface,
              up_bytes, down_bytes, total_bytes, request_count)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        AS new
         ON DUPLICATE KEY UPDATE
-            up_bytes=VALUES(up_bytes),
-            down_bytes=VALUES(down_bytes),
-            total_bytes=VALUES(total_bytes),
-            request_count=VALUES(request_count)
+            up_bytes=new.up_bytes,
+            down_bytes=new.down_bytes,
+            total_bytes=new.total_bytes,
+            request_count=new.request_count
     """
     insert_rows = []
     for r in rows:
@@ -335,6 +360,15 @@ def main():
 
         # Task 5: Local blocklist check (every cycle, same 60s window)
         check_domains_blocklist(db)
+
+        # Task 6: Update suspicious domain stats (once per day)
+        last_stats_update = get_state(db, "last_suspicious_stats_update") or ""
+        if last_stats_update != str(date.today()):
+            try:
+                update_suspicious_stats(db)
+                set_state(db, "last_suspicious_stats_update", str(date.today()))
+            except Exception:
+                log.exception("update_suspicious_stats failed")
 
     except Exception as e:
         log.error(f"collector error: {e}", exc_info=True)

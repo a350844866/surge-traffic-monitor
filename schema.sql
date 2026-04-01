@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS requests (
     INDEX idx_start_date (start_date),
     INDEX idx_mac_date (mac_address, start_date),
     INDEX idx_remote_host (remote_host(128)),
+    INDEX idx_remote_host_date (remote_host(128), start_date),
     INDEX idx_policy_date (policy_name, start_date),
     INDEX idx_source_addr (source_address, start_date)
 ) ENGINE=InnoDB ROW_FORMAT=COMPRESSED
@@ -108,10 +109,47 @@ CREATE TABLE IF NOT EXISTS suspicious_domains (
     dismissed       TINYINT(1) NOT NULL DEFAULT 0,
     dismissed_at    DATETIME NULL,
     notes           VARCHAR(1024) NULL,
+    active_days       INT UNSIGNED NOT NULL DEFAULT 0,
+    consecutive_days  INT UNSIGNED NOT NULL DEFAULT 0,
+    last_active_date  DATE NULL,
+    requests_7d       INT UNSIGNED NOT NULL DEFAULT 0,
+    requests_prev_7d  INT UNSIGNED NOT NULL DEFAULT 0,
+    bytes_7d          BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    device_count_7d   INT UNSIGNED NOT NULL DEFAULT 0,
+    persistence_score INT UNSIGNED NOT NULL DEFAULT 0,
+    stats_updated_at  DATETIME NULL,
     UNIQUE INDEX uk_host (host(255)),
     INDEX idx_dismissed (dismissed),
-    INDEX idx_severity (severity, dismissed)
+    INDEX idx_severity (severity, dismissed),
+    INDEX idx_persistence (dismissed, persistence_score)
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS trusted_parent_domains (
+    id        BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    pattern   VARCHAR(255) NOT NULL,
+    reason    VARCHAR(512) NOT NULL DEFAULT '',
+    added_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE INDEX uk_pattern (pattern)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS trusted_asns (
+    id        BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    asn       VARCHAR(32) NOT NULL,
+    org_name  VARCHAR(255) NOT NULL DEFAULT '',
+    reason    VARCHAR(512) NOT NULL DEFAULT '',
+    added_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE INDEX uk_asn (asn)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS ip_asn_cache (
+    ip         VARCHAR(45) NOT NULL PRIMARY KEY,
+    asn        VARCHAR(32) NOT NULL DEFAULT '',
+    org        VARCHAR(255) NOT NULL DEFAULT '',
+    country    VARCHAR(64) NOT NULL DEFAULT '',
+    queried_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_queried_at (queried_at),
+    INDEX idx_asn (asn)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 便捷视图：requests JOIN devices
 CREATE OR REPLACE VIEW request_details AS
@@ -138,3 +176,17 @@ SELECT
     d.vendor AS device_vendor
 FROM requests r
 LEFT JOIN devices d ON r.mac_address = d.mac_address;
+
+-- AI review background jobs
+CREATE TABLE IF NOT EXISTS ai_review_jobs (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    status          ENUM('running','done','error') NOT NULL DEFAULT 'running',
+    model           VARCHAR(128) DEFAULT '',
+    entry_count     INT UNSIGNED DEFAULT 0,
+    result_md       MEDIUMTEXT,
+    dismissed_count INT UNSIGNED DEFAULT 0,
+    kept_count      INT UNSIGNED DEFAULT 0,
+    error_msg       VARCHAR(1024) DEFAULT NULL,
+    started_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at     DATETIME DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -12,11 +12,9 @@ import os
 import sys
 import logging
 import requests
-import pymysql
-import pymysql.cursors
 
 sys.path.insert(0, os.path.dirname(__file__))
-import config
+from db import get_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,34 +75,30 @@ def update_source(db, src):
     domains = _parse(resp.text, src["format"])
     log.info(f"{src['name']}: {len(domains)} domains parsed")
 
-    with db.cursor() as cur:
-        cur.execute("DELETE FROM domain_blocklist WHERE source=%s", (src["name"],))
-    db.commit()
-
+    unique_domains = list(dict.fromkeys(domains))
     batch = 2000
     total = 0
-    sql = ("INSERT IGNORE INTO domain_blocklist (domain, source, severity, reason) "
-           "VALUES (%s,%s,%s,%s)")
-    for i in range(0, len(domains), batch):
-        rows = [(d, src["name"], src["severity"], src["reason"])
-                for d in domains[i:i + batch]]
-        with db.cursor() as cur:
+    sql = (
+        "INSERT IGNORE INTO domain_blocklist (domain, source, severity, reason) "
+        "VALUES (%s,%s,%s,%s)"
+    )
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM domain_blocklist WHERE source=%s", (src["name"],))
+        for i in range(0, len(unique_domains), batch):
+            rows = [
+                (d, src["name"], src["severity"], src["reason"])
+                for d in unique_domains[i:i + batch]
+            ]
             cur.executemany(sql, rows)
-        db.commit()
-        total += len(rows)
+            total += len(rows)
+    db.commit()
 
     log.info(f"{src['name']}: {total} rows inserted")
     return total
 
 
 def main():
-    db = pymysql.connect(
-        host=config.MYSQL_HOST, port=config.MYSQL_PORT,
-        user=config.MYSQL_USER, password=config.MYSQL_PASS,
-        database=config.MYSQL_DB, charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=False,
-    )
+    db = get_db()
     try:
         grand_total = 0
         for src in SOURCES:

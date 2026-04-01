@@ -10,10 +10,18 @@ import re
 import math
 import time
 import logging
+import ipaddress
+from datetime import date, datetime, timedelta
 
-import config
+from db import get_db
 
 log = logging.getLogger("detector")
+
+
+def _field(row, key, index=0):
+    if isinstance(row, dict):
+        return row[key]
+    return row[index]
 
 # ─── Trusted list cache (loaded from DB, refreshed every 5 min) ───────────────
 
@@ -87,9 +95,9 @@ def _get_asn_info(ip, db):
             try:
                 with db.cursor() as cur:
                     cur.execute(
-                        "INSERT INTO ip_asn_cache (ip, asn, org, country) VALUES (%s,%s,%s,%s)"
-                        " ON DUPLICATE KEY UPDATE asn=VALUES(asn), org=VALUES(org),"
-                        " country=VALUES(country), queried_at=NOW()",
+                        "INSERT INTO ip_asn_cache (ip, asn, org, country) VALUES (%s,%s,%s,%s) AS new "
+                        "ON DUPLICATE KEY UPDATE asn=new.asn, org=new.org,"
+                        " country=new.country, queried_at=NOW()",
                         (ip, result["asn"], result["org"], result["country"]),
                     )
                 db.commit()
@@ -190,6 +198,8 @@ SAFE_SUFFIXES = (
     ".synology.com", ".synology.me",
     ".ndmdhs.com",  # Netease DRM
 )
+_SAFE_DOMAIN_SET = frozenset(SAFE_DOMAINS)
+_SAFE_SUFFIX_SET = frozenset(s.lstrip(".") for s in SAFE_SUFFIXES)
 
 # Suspicious TLDs
 SUSPICIOUS_TLDS = {
@@ -214,13 +224,25 @@ def _strip_port(host):
     return host
 
 
+def _parse_ip_literal(host):
+    """Return an ipaddress object for literal IP hosts, otherwise None."""
+    h = _strip_port(host).strip().lower().rstrip(".")
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    try:
+        return ipaddress.ip_address(h)
+    except ValueError:
+        return None
+
+
 def _is_safe(host):
     """Return True if host should be skipped (known safe)."""
     h = _strip_port(host).lower().rstrip(".")
-    if h in SAFE_DOMAINS:
+    if h in _SAFE_DOMAIN_SET:
         return True
-    for suffix in SAFE_SUFFIXES:
-        if h.endswith(suffix):
+    labels = h.split(".")
+    for i in range(len(labels)):
+        if ".".join(labels[i:]) in _SAFE_SUFFIX_SET:
             return True
     return False
 
@@ -244,9 +266,9 @@ def _check_heuristics(host):
     h = _strip_port(host).lower().rstrip(".")
 
     # Bare IP address (after port stripping) — skip private/loopback ranges
-    if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', h):
-        if (h.startswith("192.168.") or h.startswith("10.") or
-                h.startswith("172.16.") or h.startswith("127.") or h == "::1"):
+    host_ip = _parse_ip_literal(h)
+    if host_ip is not None:
+        if host_ip.is_private or host_ip.is_loopback or host_ip.is_link_local:
             return None, None
         return "medium", f"直接 IP 访问（{h}），绕过 DNS 解析"
 
@@ -290,13 +312,12 @@ def check_new_domains_heuristic(db):
                 SELECT remote_host,
                        COUNT(*) AS req_count,
                        COUNT(DISTINCT mac_address) AS dev_count
-                FROM requests
-                WHERE start_date >= NOW() - INTERVAL 60 SECOND
-                  AND remote_host IS NOT NULL
-                  AND remote_host NOT IN (
-                      SELECT host FROM suspicious_domains
-                  )
-                GROUP BY remote_host
+                FROM requests r
+                LEFT JOIN suspicious_domains sd ON sd.host = r.remote_host
+                WHERE r.start_date >= NOW() - INTERVAL 60 SECOND
+                  AND r.remote_host IS NOT NULL
+                  AND sd.host IS NULL
+                GROUP BY r.remote_host
             """)
             rows = cur.fetchall()
     except Exception as e:
@@ -320,8 +341,9 @@ def check_new_domains_heuristic(db):
                              request_count, device_count, dismissed, dismissed_at, notes)
                         VALUES (%s, 'heuristic', '信任域名自动白名单', 'low',
                                 %s, %s, 1, NOW(), %s)
+                        AS new
                         ON DUPLICATE KEY UPDATE last_seen=NOW(),
-                            request_count=request_count + VALUES(request_count)
+                            request_count=request_count + new.request_count
                     """, (host, row["req_count"], row["dev_count"],
                           f"[自动白名单] 信任域名: {pattern}"))
                 db.commit()
@@ -337,7 +359,7 @@ def check_new_domains_heuristic(db):
         auto_dismiss = False
         auto_notes = None
         h = _strip_port(host).lower()
-        if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', h):
+        if _parse_ip_literal(h) is not None:
             asn_info = _get_asn_info(h, db)
             if asn_info:
                 _refresh_trusted_cache(db)
@@ -353,10 +375,11 @@ def check_new_domains_heuristic(db):
                          request_count, device_count, dismissed, dismissed_at, notes)
                     VALUES (%s, 'heuristic', %s, %s, %s, %s,
                             %s, IF(%s=1, NOW(), NULL), %s)
+                    AS new
                     ON DUPLICATE KEY UPDATE
                         last_seen=NOW(),
-                        request_count=request_count + VALUES(request_count),
-                        device_count=GREATEST(device_count, VALUES(device_count))
+                        request_count=request_count + new.request_count,
+                        device_count=GREATEST(device_count, new.device_count)
                 """, (host, reason, severity, row["req_count"], row["dev_count"],
                       int(auto_dismiss), int(auto_dismiss), auto_notes))
             db.commit()
@@ -384,11 +407,12 @@ def check_domains_blocklist(db):
                 SELECT remote_host,
                        COUNT(*) AS req_count,
                        COUNT(DISTINCT mac_address) AS dev_count
-                FROM requests
-                WHERE start_date >= NOW() - INTERVAL 60 SECOND
-                  AND remote_host IS NOT NULL
-                  AND remote_host NOT IN (SELECT host FROM suspicious_domains)
-                GROUP BY remote_host
+                FROM requests r
+                LEFT JOIN suspicious_domains sd ON sd.host = r.remote_host
+                WHERE r.start_date >= NOW() - INTERVAL 60 SECOND
+                  AND r.remote_host IS NOT NULL
+                  AND sd.host IS NULL
+                GROUP BY r.remote_host
             """)
             rows = cur.fetchall()
     except Exception as e:
@@ -431,12 +455,13 @@ def check_domains_blocklist(db):
                     INSERT INTO suspicious_domains
                         (host, detection_type, reason, severity, request_count, device_count)
                     VALUES (%s, 'blocklist', %s, %s, %s, %s)
+                    AS new
                     ON DUPLICATE KEY UPDATE
                         last_seen=NOW(),
-                        reason=VALUES(reason),
-                        severity=GREATEST(severity, VALUES(severity)),
-                        request_count=GREATEST(request_count, VALUES(request_count)),
-                        device_count=GREATEST(device_count, VALUES(device_count))
+                        reason=new.reason,
+                        severity=GREATEST(severity, new.severity),
+                        request_count=GREATEST(request_count, new.request_count),
+                        device_count=GREATEST(device_count, new.device_count)
                 """, (host, m["reason"], m["severity"],
                       int(row["req_count"]), int(row["dev_count"])))
             db.commit()
@@ -448,21 +473,155 @@ def check_domains_blocklist(db):
     return count
 
 
+# ─── Suspicious domain stats updater ─────────────────────────────────────────
+
+def update_suspicious_stats(db):
+    """
+    每日一次：为 suspicious_domains 中所有未 dismissed 的条目计算持久性统计，
+    写入 active_days / consecutive_days / last_active_date /
+         requests_7d / requests_prev_7d / bytes_7d / device_count_7d /
+         persistence_score / stats_updated_at。
+    """
+    today = date.today()
+    recent_start_day = today - timedelta(days=6)
+    previous_start_day = today - timedelta(days=13)
+    recent_start_dt = datetime.combine(recent_start_day, datetime.min.time())
+    recent_end_dt = datetime.combine(today + timedelta(days=1), datetime.min.time())
+    previous_start_dt = datetime.combine(previous_start_day, datetime.min.time())
+    previous_end_dt = recent_start_dt
+
+    with db.cursor() as cur:
+        cur.execute("SELECT host FROM suspicious_domains WHERE dismissed = 0")
+        hosts = [_field(r, "host", 0) for r in cur.fetchall()]
+
+    if not hosts:
+        return 0
+
+    def _batched(items, batch_size):
+        for start in range(0, len(items), batch_size):
+            yield items[start:start + batch_size]
+
+    stats_by_host = {}
+    days_by_host = {host: [] for host in hosts}
+
+    for batch_hosts in _batched(hosts, 200):
+        placeholders = ",".join(["%s"] * len(batch_hosts))
+        with db.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    remote_host AS host,
+                    COALESCE(SUM(CASE WHEN start_date >= %s AND start_date < %s THEN 1 ELSE 0 END), 0) AS req_7d,
+                    COALESCE(SUM(CASE WHEN start_date >= %s AND start_date < %s THEN 1 ELSE 0 END), 0) AS req_prev,
+                    COALESCE(SUM(CASE WHEN start_date >= %s AND start_date < %s THEN in_bytes + out_bytes ELSE 0 END), 0) AS bytes_7d,
+                    COUNT(DISTINCT CASE WHEN start_date >= %s AND start_date < %s THEN mac_address END) AS dev_7d,
+                    MAX(start_date) AS last_active_dt,
+                    COUNT(DISTINCT DATE(start_date)) AS active_days
+                FROM requests
+                WHERE remote_host IN (""" + placeholders + """)
+                GROUP BY remote_host
+            """, (
+                recent_start_dt, recent_end_dt,
+                previous_start_dt, previous_end_dt,
+                recent_start_dt, recent_end_dt,
+                recent_start_dt, recent_end_dt,
+                *batch_hosts,
+            ))
+            for row in cur.fetchall():
+                stats_by_host[row["host"]] = row
+
+            cur.execute("""
+                SELECT remote_host AS host, DATE(start_date) AS active_day
+                FROM requests
+                WHERE remote_host IN (""" + placeholders + """)
+                GROUP BY remote_host, DATE(start_date)
+                ORDER BY remote_host, active_day
+            """, (*batch_hosts,))
+            for row in cur.fetchall():
+                days_by_host.setdefault(row["host"], []).append(row["active_day"])
+
+    updated = 0
+    update_rows = []
+    for host in hosts:
+        row = stats_by_host.get(host, {})
+        req_7d = int(row.get("req_7d") or 0)
+        req_prev = int(row.get("req_prev") or 0)
+        bytes_7d = int(row.get("bytes_7d") or 0)
+        dev_7d = int(row.get("dev_7d") or 0)
+        last_active_dt = row.get("last_active_dt")
+        last_active = last_active_dt.date() if last_active_dt else None
+        active_days = int(row.get("active_days") or 0)
+
+        consecutive_days = 0
+        day_rows = days_by_host.get(host, [])
+        if day_rows:
+            streak = best = 1
+            for i in range(1, len(day_rows)):
+                if (day_rows[i] - day_rows[i - 1]).days == 1:
+                    streak += 1
+                    best = max(best, streak)
+                else:
+                    streak = 1
+            consecutive_days = best
+
+        # 3. 持久性评分
+        # 活跃天数（每天+2，上限30天=60分）
+        score = min(active_days, 30) * 2
+        # 最长连续（每天+3，上限14天=42分）
+        score += min(consecutive_days, 14) * 3
+        # 今日仍活跃 +15
+        if last_active == today:
+            score += 15
+        # 近7天多设备 +10/台（额外设备）
+        if dev_7d > 1:
+            score += min(dev_7d - 1, 3) * 10
+        # 流量上升趋势（近7天 > 前7天的1.5倍）+10
+        if req_prev > 0 and req_7d > req_prev * 1.5:
+            score += 10
+        elif req_prev == 0 and req_7d >= 5:
+            # 前7天没有、近7天有5次以上也加分
+            score += 5
+
+        update_rows.append((
+            active_days,
+            consecutive_days,
+            last_active,
+            req_7d,
+            req_prev,
+            bytes_7d,
+            dev_7d,
+            score,
+            host,
+        ))
+        updated += 1
+
+    with db.cursor() as cur:
+        cur.executemany("""
+            UPDATE suspicious_domains SET
+                active_days       = %s,
+                consecutive_days  = %s,
+                last_active_date  = %s,
+                requests_7d       = %s,
+                requests_prev_7d  = %s,
+                bytes_7d          = %s,
+                device_count_7d   = %s,
+                persistence_score = %s,
+                stats_updated_at  = NOW()
+            WHERE host = %s AND dismissed = 0
+        """, update_rows)
+
+    db.commit()
+    log.info(f"update_suspicious_stats: updated {updated} entries")
+    return updated
+
+
 # ─── Standalone test ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import sys
-    import pymysql
-    import pymysql.cursors
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    db = pymysql.connect(
-        host=config.MYSQL_HOST, port=config.MYSQL_PORT,
-        user=config.MYSQL_USER, password=config.MYSQL_PASS,
-        database=config.MYSQL_DB, charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor, autocommit=False,
-    )
+    db = get_db()
     mode = sys.argv[1] if len(sys.argv) > 1 else "both"
     if mode in ("heuristic", "both"):
         n = check_new_domains_heuristic(db)

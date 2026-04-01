@@ -111,11 +111,34 @@
     <span id="nav-sus-badge" style="display:none;position:absolute;top:2px;right:2px;
           width:7px;height:7px;background:#ef4444;border-radius:50%"></span>
   </a>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+    <span style="color:#475569;font-size:12px">AI 模型</span>
+    <select id="global-ai-model"
+      style="background:#1a1d27;border:1px solid #2d3148;color:#a78bfa;
+             padding:3px 6px;border-radius:6px;font-size:12px;cursor:pointer;outline:none">
+      <option value="minimax/minimax-m2.7">MiniMax M2.7</option>
+      <option value="anthropic/claude-sonnet-4-6">Claude Sonnet 4.6</option>
+    </select>
+  </div>
 </nav>
 <div class="container">
 {% block content %}{% endblock %}
 </div>
 <script>
+// ── Global AI model selector ─────────────────────────────────────────────────
+(function() {
+  const sel = document.getElementById('global-ai-model');
+  const saved = localStorage.getItem('ai_model');
+  if (saved) {
+    const opt = sel.querySelector(`option[value="${saved}"]`);
+    if (opt) sel.value = saved;
+  }
+  sel.addEventListener('change', () => localStorage.setItem('ai_model', sel.value));
+})();
+function getAiModel() {
+  return document.getElementById('global-ai-model').value;
+}
+
 // Highlight active nav
 const path = location.pathname;
 if (path === '/') document.getElementById('nav-overview').classList.add('active');
@@ -170,6 +193,10 @@ function setupDateRange(onChange) {
       if (key === '1') {
         const d = isoDate(today);
         applyRange(d, d, '1');
+      } else if (key === 'yesterday') {
+        const y = new Date(today); y.setDate(today.getDate() - 1);
+        const d = isoDate(y);
+        applyRange(d, d, 'yesterday');
       } else if (key === '7') {
         const s = new Date(today); s.setDate(today.getDate() - 6);
         applyRange(isoDate(s), isoDate(today), '7');
@@ -229,6 +256,8 @@ function renderMarkdown(md) {
 let _aiAbort = null;
 
 function openAiModal(title, url) {
+  const model = getAiModel();
+  url += (url.includes('?') ? '&' : '?') + 'model=' + encodeURIComponent(model);
   document.getElementById('ai-modal-title').textContent = '🤖 ' + title;
   const body = document.getElementById('ai-modal-body');
   body.innerHTML = '<span style="color:#64748b">分析中...</span>';

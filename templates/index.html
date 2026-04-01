@@ -9,6 +9,7 @@
   <div class="date-picker">
     <div class="range-btns">
       <button class="range-btn active" data-range="1">今天</button>
+      <button class="range-btn" data-range="yesterday">昨天</button>
       <button class="range-btn" data-range="7">近7天</button>
       <button class="range-btn" data-range="30">近30天</button>
       <button class="range-btn" data-range="month">本月</button>
@@ -29,8 +30,8 @@
 
 <div id="suspicious-banner" style="display:none;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:12px;padding:14px 20px;margin-bottom:16px;align-items:center;gap:12px">
   <span style="font-size:20px">🚨</span>
-  <span style="flex:1;color:#fca5a5">发现 <strong id="sus-banner-count">0</strong> 个高危域名</span>
-  <a href="/suspicious" style="color:#f87171;font-size:13px;text-decoration:none;
+  <span style="flex:1;color:#fca5a5">发现 <strong id="sus-banner-count">0</strong> 个持续活跃的可疑域名</span>
+  <a href="/suspicious?sev=high" style="color:#f87171;font-size:13px;text-decoration:none;
      border:1px solid #7f1d1d;padding:4px 12px;border-radius:6px">查看详情 →</a>
 </div>
 
@@ -41,21 +42,35 @@
 
 <!-- Hour drill-down modal -->
 <div id="hour-modal-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:900;align-items:center;justify-content:center">
-  <div style="background:#1a1d27;border:1px solid #2d3148;border-radius:14px;width:min(820px,94vw);max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5)">
-    <div style="padding:16px 22px;border-bottom:1px solid #2d3148;display:flex;align-items:center;justify-content:space-between">
-      <div>
-        <span id="hour-modal-title" style="font-weight:600;font-size:16px;color:#f1f5f9"></span>
-        <span style="color:#475569;font-size:13px;margin-left:10px">按上传流量排序</span>
+  <div id="hour-modal" style="background:#1a1d27;border:1px solid #2d3148;border-radius:14px;
+       width:min(1000px,94vw);height:72vh;min-width:520px;min-height:320px;
+       display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5);
+       resize:both;overflow:hidden">
+    <div style="padding:14px 18px;border-bottom:1px solid #2d3148;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span id="hour-modal-title" style="font-weight:600;font-size:15px;color:#f1f5f9"></span>
+        <div style="display:flex;gap:5px">
+          <button class="sort-btn active" id="modal-sort-upload" onclick="switchModalSort('upload')">↑ 上传</button>
+          <button class="sort-btn" id="modal-sort-download" onclick="switchModalSort('download')">↓ 下载</button>
+        </div>
+        <button class="ai-btn" id="hour-ai-btn" onclick="openHourAi()"
+          style="padding:3px 10px;font-size:12px;border-radius:6px">✨ AI 分析</button>
       </div>
-      <button onclick="closeHourModal()" style="background:none;border:none;color:#64748b;font-size:20px;cursor:pointer;line-height:1">×</button>
+      <button onclick="closeHourModal()" style="background:none;border:none;color:#64748b;font-size:20px;cursor:pointer;line-height:1;flex-shrink:0">×</button>
     </div>
-    <div style="overflow-y:auto;padding:18px 22px;flex:1">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px" id="hour-modal-grid">
+    <div style="overflow-y:auto;padding:16px 18px;flex:1">
+      <div style="display:grid;grid-template-columns:3fr 2fr;gap:16px" id="hour-modal-grid">
         <div>
-          <div style="font-size:13px;font-weight:600;color:#94a3b8;margin-bottom:10px;text-transform:uppercase;letter-spacing:.05em">域名 TOP 20</div>
-          <table style="width:100%;font-size:13px;border-collapse:collapse" id="hour-domains-tbl">
+          <div style="font-size:12px;font-weight:600;color:#94a3b8;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">域名 TOP 20</div>
+          <table style="width:100%;font-size:13px;border-collapse:collapse;table-layout:fixed" id="hour-domains-tbl">
+            <colgroup>
+              <col style="width:auto">
+              <col style="width:56px">
+              <col style="width:70px">
+              <col style="width:70px">
+            </colgroup>
             <thead><tr style="color:#475569">
-              <th style="text-align:left;padding:4px 6px;font-weight:500">域名</th>
+              <th style="text-align:left;padding:4px 6px;font-weight:500;overflow:hidden">域名</th>
               <th style="text-align:left;padding:4px 6px;font-weight:500">策略</th>
               <th style="text-align:right;padding:4px 6px;font-weight:500">上传</th>
               <th style="text-align:right;padding:4px 6px;font-weight:500">下载</th>
@@ -64,7 +79,7 @@
           </table>
         </div>
         <div>
-          <div style="font-size:13px;font-weight:600;color:#94a3b8;margin-bottom:10px;text-transform:uppercase;letter-spacing:.05em">设备 TOP 10</div>
+          <div style="font-size:12px;font-weight:600;color:#94a3b8;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">设备 TOP 10</div>
           <table style="width:100%;font-size:13px;border-collapse:collapse" id="hour-devices-tbl">
             <thead><tr style="color:#475569">
               <th style="text-align:left;padding:4px 6px;font-weight:500">设备</th>
@@ -103,6 +118,8 @@
 let hourlyChart = null;
 let currentTrendData = null;
 let currentDateRange = null;
+let currentHourData = null;
+let currentHourSort = 'upload';
 
 function initChart() {
   hourlyChart = echarts.init(document.getElementById('chart-hourly'));
@@ -111,24 +128,40 @@ function initChart() {
 
 function onTrendBarClick(params) {
   if (!currentTrendData) return;
+  // params.seriesName is '上传' or '下载'; map to sort key
+  const sort = params.seriesName === '下载' ? 'download' : 'upload';
   const label = currentTrendData.labels[params.dataIndex];
   if (currentTrendData.multi_day) {
-    // multi-day: label is a date string "2026-03-26"
-    openHourModal(label, null);
+    openHourModal(label, null, sort);
   } else {
-    // single-day: label is "H:00", date is currentDateRange.start
     const hour = parseInt(label);
-    openHourModal(currentDateRange ? currentDateRange.start : null, hour);
+    openHourModal(currentDateRange ? currentDateRange.start : null, hour, sort);
   }
 }
 
-async function openHourModal(date, hour) {
+function setModalSortBtns(sort) {
+  document.getElementById('modal-sort-upload').classList.toggle('active', sort === 'upload');
+  document.getElementById('modal-sort-download').classList.toggle('active', sort === 'download');
+}
+
+function switchModalSort(sort) {
+  if (!currentHourData) return;
+  currentHourSort = sort;
+  setModalSortBtns(sort);
+  renderHourDomains(currentHourData.top_domains, sort);
+  renderHourDevices(currentHourData.top_devices, sort);
+}
+
+async function openHourModal(date, hour, sort) {
+  sort = sort || 'upload';
+  currentHourSort = sort;
   const backdrop = document.getElementById('hour-modal-backdrop');
   const loading  = document.getElementById('hour-modal-loading');
   const grid     = document.getElementById('hour-modal-grid');
   backdrop.style.display = 'flex';
   loading.style.display  = 'block';
   grid.style.display     = 'none';
+  setModalSortBtns(sort);
 
   let url, title;
   if (hour !== null && hour !== undefined) {
@@ -143,8 +176,9 @@ async function openHourModal(date, hour) {
   try {
     const res  = await fetch(url);
     const data = await res.json();
-    renderHourDomains(data.top_domains);
-    renderHourDevices(data.top_devices);
+    currentHourData = data;
+    renderHourDomains(data.top_domains, sort);
+    renderHourDevices(data.top_devices, sort);
     loading.style.display = 'none';
     grid.style.display    = 'grid';
   } catch(e) {
@@ -152,9 +186,12 @@ async function openHourModal(date, hour) {
   }
 }
 
-function renderHourDomains(domains) {
-  document.getElementById('hour-domains-body').innerHTML = domains.length
-    ? domains.map(d => `<tr style="border-top:1px solid #1e2130">
+function renderHourDomains(domains, sort) {
+  const sorted = [...domains].sort((a, b) =>
+    sort === 'download' ? (b.download_bytes - a.download_bytes) : (b.upload_bytes - a.upload_bytes)
+  );
+  document.getElementById('hour-domains-body').innerHTML = sorted.length
+    ? sorted.map(d => `<tr style="border-top:1px solid #1e2130">
         <td style="padding:5px 6px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e2e8f0" title="${d.host}">${d.host}</td>
         <td style="padding:5px 6px">${policyBadge(d.policy)}</td>
         <td style="padding:5px 6px;text-align:right;color:#60a5fa">${fmtBytes(d.upload_bytes)}</td>
@@ -163,9 +200,12 @@ function renderHourDomains(domains) {
     : '<tr><td colspan="4" style="padding:20px 6px;color:#475569;text-align:center">该时段无数据</td></tr>';
 }
 
-function renderHourDevices(devices) {
-  document.getElementById('hour-devices-body').innerHTML = devices.length
-    ? devices.map(d => {
+function renderHourDevices(devices, sort) {
+  const sorted = [...devices].sort((a, b) =>
+    sort === 'download' ? (b.download_bytes - a.download_bytes) : (b.upload_bytes - a.upload_bytes)
+  );
+  document.getElementById('hour-devices-body').innerHTML = sorted.length
+    ? sorted.map(d => {
         const name = d.device_name || d.mac_address || '未知';
         const link = d.mac_address ? `<a href="/device/${encodeURIComponent(d.mac_address)}" style="color:#e2e8f0;text-decoration:none">${name}</a>` : name;
         return `<tr style="border-top:1px solid #1e2130">
@@ -179,6 +219,20 @@ function renderHourDevices(devices) {
 
 function closeHourModal() {
   document.getElementById('hour-modal-backdrop').style.display = 'none';
+}
+
+function openHourAi() {
+  if (!currentHourData) return;
+  const { date, hour, full_day } = currentHourData;
+  let url = `/api/ai/overview/hour?date=${date}&sort=${currentHourSort}`;
+  if (full_day) {
+    url += '&full_day=1';
+  } else {
+    url += `&hour=${hour}`;
+  }
+  const focusLabel = currentHourSort === 'download' ? '下载流量' : '上传流量';
+  const title = document.getElementById('hour-modal-title').textContent + ' · ' + focusLabel + '分析';
+  openAiModal(title, url);
 }
 document.getElementById('hour-modal-backdrop').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeHourModal();
@@ -260,10 +314,10 @@ const r = getRange();
 load(r.start, r.end);
 window.addEventListener('resize', () => hourlyChart && hourlyChart.resize());
 
-// Load suspicious domain banner — only show if there are high-risk domains
+// 首页横幅只显示持续活跃（persistence_score≥30）的高危域名，过滤掉一次性告警
 fetch('/api/suspicious/count').then(r=>r.json()).then(d=>{
-  if(d.high>0){
-    document.getElementById('sus-banner-count').textContent=d.high;
+  if(d.confirmed>0){
+    document.getElementById('sus-banner-count').textContent=d.confirmed;
     const banner=document.getElementById('suspicious-banner');
     banner.style.display='flex';
   }

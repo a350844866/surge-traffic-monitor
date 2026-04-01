@@ -45,6 +45,20 @@ Linux 服务器
         └── Dashboard + AI 分析 + 可疑域名管理 API
 ```
 
+## 部署备注
+
+当前实际部署采用 Docker Compose：
+- Compose 项目目录：`/data/surge-monitor`
+- 源码目录：`/programHost/surge-traffic-collector`
+- 容器通过 bind mount 将 `/programHost/surge-traffic-collector` 挂载到容器内 `/app`
+- Compose 通过 `/programHost/surge-traffic-collector/.env` 向容器注入运行配置，不应在 `docker-compose.yml` 内写入明文密钥
+
+也就是说：
+- 代码修改应在 `/programHost/surge-traffic-collector` 完成
+- 容器编排、镜像构建和重启应在 `/data/surge-monitor` 执行
+
+宿主机上虽然保留了历史 `systemd` unit，但当前应以 Docker Compose 部署为准。
+
 ## 数据库表结构
 
 | 表 | 说明 |
@@ -83,43 +97,70 @@ Linux 服务器
 ### 依赖
 
 ```bash
-pip install flask requests pymysql
-apt install sshpass   # 用于 SCP 拉取 SQLite
+pip install -r requirements.txt
+apt install sshpass   # 仅在仍使用密码方式拉取 SQLite 时需要
 ```
 
-MySQL 5.7+ / 8.0，需开启分区支持。
+建议使用 MySQL 8.0.19+，并开启分区支持。
 
 ### 配置
 
 ```bash
 cp config.example.py config.py
-# 编辑 config.py，填入你的实际值
+# 将实际值放入环境变量或 .env，config.py 只负责读取
+cp .env.example .env
 ```
 
 配置项说明：
 
-```python
+```bash
 # Surge 所在机器
-SURGE_HOST = "192.168.x.x"
-SURGE_SSH_USER = "your_username"
-SURGE_SSH_PASS = "your_ssh_password"
-SURGE_API_KEY  = "your_surge_api_key"   # Surge HTTP API 的认证 key
-SURGE_API_LOCAL_PORT  = 16679           # 本机 SSH 隧道端口
-SURGE_API_REMOTE_PORT = 16678           # Surge 监听端口
+SURGE_HOST=192.168.x.x
+SURGE_SSH_USER=your_username
+SURGE_SSH_KEY_PATH=/root/.ssh/id_ed25519
+# 或回退到密码文件 / 环境变量（二选一）
+SURGE_SSH_PASS_FILE=/root/.config/surge-ssh.pass
+SURGE_SSH_PASS=
+SURGE_API_KEY=your_surge_api_key
+SURGE_API_LOCAL_PORT=16679
+SURGE_API_REMOTE_PORT=16678
 
 # SQLite 日文件路径（Mac 上的完整路径）
-SURGE_SQLITE_PATH = "/Users/xxx/Library/.../TrafficStatData/Session"
+SURGE_SQLITE_PATH="/Users/xxx/Library/.../TrafficStatData/Session"
 
 # MySQL
-MYSQL_HOST = "127.0.0.1"
-MYSQL_USER = "root"
-MYSQL_PASS = "your_mysql_password"
-MYSQL_DB   = "surge_traffic"
+MYSQL_HOST=127.0.0.1
+MYSQL_USER=root
+MYSQL_PASS=your_mysql_password
+MYSQL_DB=surge_traffic
+DB_POOL_MAX_CONNECTIONS=10
 
-# OpenRouter AI（用于流量分析和可疑域名 AI 审查，不需要可留空）
-OPENROUTER_API_KEY = "sk-or-v1-..."
-OPENROUTER_MODEL   = "minimax/minimax-m2.7"
+# OpenRouter AI（不需要可留空）
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_MODEL=minimax/minimax-m2.7
 ```
+
+推荐将这些值放入项目目录下的 `.env` 文件；`config.py` / `config.example.py` 会自动读取。由于旧版 `config.py` 可能已经暴露过明文凭据，迁移后请自行轮换相关密码和 API Key。
+
+### 从旧版本升级
+
+如果你是从旧版直接升级到当前版本，建议按下面顺序执行：
+
+```bash
+cp .env.example .env
+# 编辑 .env，填入你的真实配置
+pip install -r requirements.txt
+python3 upgrade.py
+python3 ensure_request_partitions.py
+```
+
+`upgrade.py` 会自动完成以下结构升级：
+- 创建 `trusted_parent_domains` / `trusted_asns` / `ip_asn_cache` / `ai_review_jobs`
+- 给 `suspicious_domains` 补持久性统计列和索引
+- 给 `requests` 补 `(remote_host, start_date)` 组合索引
+- 补齐 `collector_state` 缺失的默认键
+
+完成后再重启 `collector.py` 和 `web.py` 对应的 systemd 服务。
 
 ### 初始化数据库
 
@@ -140,6 +181,8 @@ http-api = YOUR_KEY@0.0.0.0:16678
 ```bash
 ssh -N -L 16679:127.0.0.1:16678 user@192.168.x.x
 ```
+
+SCP 拉取 SQLite 建议优先使用 SSH key；只有在无法改造为 key 认证时，才使用 `SURGE_SSH_PASS_FILE` / `SURGE_SSH_PASS` 回退。
 
 ### 以 systemd 运行
 
@@ -191,6 +234,14 @@ systemctl enable --now surge-collector.timer surge-dashboard.service surge-block
 ```
 
 Dashboard 默认监听 `:8866`。
+
+**分区自动维护**：建议每月执行一次：
+
+```bash
+python3 ensure_request_partitions.py
+```
+
+该脚本会补齐 `requests` 表未来数月的月分区，避免新数据长期落入 `p_future`。
 
 ## AI 功能
 
