@@ -77,3 +77,17 @@ DEVICE_SYNC_INTERVAL = _get_int("DEVICE_SYNC_INTERVAL", 300)
 SQLITE_SYNC_INTERVAL = _get_int("SQLITE_SYNC_INTERVAL", 3600)
 BLOCKLIST_UPDATE_INTERVAL = _get_int("BLOCKLIST_UPDATE_INTERVAL", 86400)
 REQUEST_PARTITION_MONTHS_AHEAD = _get_int("REQUEST_PARTITION_MONTHS_AHEAD", 6)
+
+# Airport (subscription) management
+SUBCONVERTER_URL = os.getenv("SUBCONVERTER_URL", "http://127.0.0.1:25500")
+SUB_STORE_PATH = os.getenv("SUB_STORE_PATH", "/data/sub-store")
+SURGE_CONF_DIR = os.getenv(
+    "SURGE_CONF_DIR",
+    "/Users/your_username/Library/Mobile Documents/iCloud~com~nssurge~inc/Documents",
+)
+SURGE_CONF_INTERNAL = os.getenv("SURGE_CONF_INTERNAL", "your-config.conf")
+SURGE_CONF_PUBLIC = os.getenv("SURGE_CONF_PUBLIC", "your-config-public.conf")
+AIRPORT_INTERNAL_BASE = os.getenv("AIRPORT_INTERNAL_BASE", "http://127.0.0.1:8866/sub")
+AIRPORT_PUBLIC_BASE = os.getenv("AIRPORT_PUBLIC_BASE", "")
+AIRPORT_FILE_AUTH_USER = os.getenv("AIRPORT_FILE_AUTH_USER", "surge")
+AIRPORT_FILE_AUTH_PASS = os.getenv("AIRPORT_FILE_AUTH_PASS", "")

@@ -111,6 +111,7 @@
     <span id="nav-sus-badge" style="display:none;position:absolute;top:2px;right:2px;
           width:7px;height:7px;background:#ef4444;border-radius:50%"></span>
   </a>
+  <a href="/airports" id="nav-airports">机场</a>
   <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
     <span style="color:#475569;font-size:12px">AI 模型</span>
     <select id="global-ai-model"
@@ -145,6 +146,7 @@ if (path === '/') document.getElementById('nav-overview').classList.add('active'
 else if (path.startsWith('/device')) document.getElementById('nav-devices').classList.add('active');
 else if (path.startsWith('/domains') || path.startsWith('/domain/')) document.getElementById('nav-domains').classList.add('active');
 else if (path.startsWith('/policies') || path.startsWith('/policy_group/')) document.getElementById('nav-policies').classList.add('active');
+else if (path.startsWith('/airports')) document.getElementById('nav-airports').classList.add('active');
 else if (path.startsWith('/suspicious')) document.getElementById('nav-suspicious').classList.add('active');
 
 // Show red dot on nav if there are active suspicious domains

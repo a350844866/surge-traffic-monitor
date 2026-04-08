@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+{% block title %}机场管理 - Surge Monitor{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">机场管理</h1>
+  <button class="ai-btn" onclick="showAddModal()">+ 添加机场</button>
+</div>
+
+<div id="airport-list" class="loading">加载中...</div>
+
+<!-- Add Airport Modal -->
+<div class="ai-modal-backdrop" id="add-backdrop">
+  <div class="ai-modal" style="width:min(560px,92vw)">
+    <div class="ai-modal-head">
+      <h4>添加机场</h4>
+      <button class="ai-modal-close" onclick="closeAddModal()">&#x2715;</button>
+    </div>
+    <div class="ai-modal-body" style="overflow:visible">
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">
+            机场标识 (英文, 用于策略组命名)
+          </label>
+          <input id="add-name" type="text" placeholder="e.g. liangxin"
+            style="width:100%;background:#0f1117;border:1px solid #2d3148;color:#e2e8f0;
+                   padding:8px 12px;border-radius:6px;font-size:14px">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">
+            显示名称
+          </label>
+          <input id="add-display" type="text" placeholder="e.g. 良心机场"
+            style="width:100%;background:#0f1117;border:1px solid #2d3148;color:#e2e8f0;
+                   padding:8px 12px;border-radius:6px;font-size:14px">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">
+            订阅链接 (原始链接, 系统会通过 subconverter 转换)
+          </label>
+          <input id="add-url" type="text" placeholder="https://xxx.com/api/v1/client/subscribe?token=..."
+            style="width:100%;background:#0f1117;border:1px solid #2d3148;color:#e2e8f0;
+                   padding:8px 12px;border-radius:6px;font-size:14px">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">
+            插入位置 (在哪个机场后面, 留空则加到末尾)
+          </label>
+          <select id="add-after"
+            style="width:100%;background:#0f1117;border:1px solid #2d3148;color:#e2e8f0;
+                   padding:8px 12px;border-radius:6px;font-size:14px">
+            <option value="">末尾</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input id="add-autoupdate" type="checkbox" checked>
+          <label style="font-size:13px;color:#94a3b8">启用自动更新 (每6小时)</label>
+        </div>
+        <div id="add-error" style="color:#f87171;font-size:13px;display:none"></div>
+        <button id="add-submit" onclick="submitAdd()"
+          style="background:#312e81;border:1px solid #6d28d9;color:#a5b4fc;
+                 padding:10px;border-radius:8px;font-size:14px;cursor:pointer;
+                 transition:all .15s">
+          获取节点并添加
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete Confirm Modal -->
+<div class="ai-modal-backdrop" id="del-backdrop">
+  <div class="ai-modal" style="width:min(420px,92vw)">
+    <div class="ai-modal-head">
+      <h4 id="del-title">确认删除</h4>
+      <button class="ai-modal-close" onclick="closeDelModal()">&#x2715;</button>
+    </div>
+    <div class="ai-modal-body">
+      <p>将从 Surge 配置中移除该机场的所有策略组引用, 并删除节点文件。此操作不可撤销。</p>
+      <p id="del-detail" style="color:#fb923c;margin-top:8px"></p>
+      <div style="display:flex;gap:10px;margin-top:16px">
+        <button onclick="closeDelModal()"
+          style="flex:1;background:#1a1d27;border:1px solid #2d3148;color:#94a3b8;
+                 padding:8px;border-radius:6px;cursor:pointer">取消</button>
+        <button id="del-confirm" onclick="confirmDelete()"
+          style="flex:1;background:#450a0a;border:1px solid #991b1b;color:#fca5a5;
+                 padding:8px;border-radius:6px;cursor:pointer">删除</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let airports = {};
+let deletingName = '';
+
+async function loadAirports() {
+  const el = document.getElementById('airport-list');
+  try {
+    const r = await fetch('/api/airports');
+    airports = await r.json();
+    renderAirports();
+    populateInsertAfter();
+  } catch(e) {
+    el.innerHTML = '<p style="color:#f87171">加载失败</p>';
+  }
+}
+
+function renderAirports() {
+  const el = document.getElementById('airport-list');
+  const names = Object.keys(airports);
+  if (!names.length) {
+    el.innerHTML = '<p style="color:#64748b">暂无机场, 点击右上角添加</p>';
+    return;
+  }
+
+  let html = '<div style="display:grid;gap:16px">';
+  for (const name of names) {
+    const a = airports[name];
+    const mtime = a.file_mtime ? new Date(a.file_mtime * 1000).toLocaleString('zh-CN') : '-';
+    const refreshed = a.last_refreshed || '-';
+    const autoTag = a.auto_update
+      ? '<span style="color:#34d399;font-size:11px">自动更新</span>'
+      : '<span style="color:#64748b;font-size:11px">手动</span>';
+
+    html += `
+    <div class="panel" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+      <div style="flex:1;min-width:200px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+          <span style="font-size:16px;font-weight:600;color:#f1f5f9">${a.display_name || name}</span>
+          <span style="font-size:12px;color:#64748b;font-family:monospace">${name}</span>
+          ${autoTag}
+        </div>
+        <div style="font-size:12px;color:#64748b;display:flex;gap:16px;flex-wrap:wrap">
+          <span>节点: <b style="color:#a78bfa">${a.node_count || 0}</b></span>
+          <span>文件更新: ${mtime}</span>
+          ${a.file_exists ? '<span style="color:#34d399">文件正常</span>' : '<span style="color:#f87171">文件缺失</span>'}
+        </div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button onclick="refreshAirport('${name}')" class="range-btn" id="refresh-${name}">刷新节点</button>
+        <button onclick="showDelModal('${name}','${a.display_name||name}')"
+          class="range-btn" style="border-color:#991b1b;color:#fca5a5">删除</button>
+      </div>
+    </div>`;
+  }
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function populateInsertAfter() {
+  const sel = document.getElementById('add-after');
+  sel.innerHTML = '<option value="">末尾</option>';
+  for (const name of Object.keys(airports)) {
+    sel.innerHTML += `<option value="${name}">${airports[name].display_name || name}</option>`;
+  }
+}
+
+async function refreshAirport(name) {
+  const btn = document.getElementById('refresh-' + name);
+  if (btn) { btn.disabled = true; btn.textContent = '刷新中...'; }
+  try {
+    const r = await fetch(`/api/airports/${name}/refresh`, {method: 'POST'});
+    const d = await r.json();
+    if (d.ok) {
+      btn.textContent = `${d.node_count} 节点`;
+      setTimeout(() => loadAirports(), 1000);
+    } else {
+      alert(d.error || 'refresh failed');
+      if(btn) { btn.disabled = false; btn.textContent = '刷新节点'; }
+    }
+  } catch(e) {
+    alert('Error: ' + e);
+    if(btn) { btn.disabled = false; btn.textContent = '刷新节点'; }
+  }
+}
+
+function showAddModal() {
+  document.getElementById('add-backdrop').classList.add('open');
+  document.getElementById('add-error').style.display = 'none';
+}
+function closeAddModal() {
+  document.getElementById('add-backdrop').classList.remove('open');
+}
+
+async function submitAdd() {
+  const name = document.getElementById('add-name').value.trim();
+  const display = document.getElementById('add-display').value.trim();
+  const url = document.getElementById('add-url').value.trim();
+  const after = document.getElementById('add-after').value;
+  const autoUpdate = document.getElementById('add-autoupdate').checked;
+  const errEl = document.getElementById('add-error');
+  const btn = document.getElementById('add-submit');
+
+  if (!name || !url) {
+    errEl.textContent = '请填写机场标识和订阅链接';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '正在获取节点...';
+  errEl.style.display = 'none';
+
+  try {
+    const r = await fetch('/api/airports', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        name, display_name: display || name, subscribe_url: url,
+        auto_update: autoUpdate, insert_after: after,
+      })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      closeAddModal();
+      document.getElementById('add-name').value = '';
+      document.getElementById('add-display').value = '';
+      document.getElementById('add-url').value = '';
+      loadAirports();
+      if (d.errors && d.errors.length) {
+        alert('添加成功 (' + d.node_count + ' 节点), 但有警告:\n' + d.errors.join('\n'));
+      }
+    } else {
+      errEl.textContent = d.error || '添加失败';
+      errEl.style.display = 'block';
+    }
+  } catch(e) {
+    errEl.textContent = 'Error: ' + e;
+    errEl.style.display = 'block';
+  }
+  btn.disabled = false;
+  btn.textContent = '获取节点并添加';
+}
+
+function showDelModal(name, display) {
+  deletingName = name;
+  document.getElementById('del-detail').textContent = `机场: ${display} (${name})`;
+  document.getElementById('del-backdrop').classList.add('open');
+}
+function closeDelModal() {
+  document.getElementById('del-backdrop').classList.remove('open');
+  deletingName = '';
+}
+async function confirmDelete() {
+  if (!deletingName) return;
+  const btn = document.getElementById('del-confirm');
+  btn.disabled = true;
+  btn.textContent = '删除中...';
+  try {
+    const r = await fetch(`/api/airports/${deletingName}`, {method:'DELETE'});
+    const d = await r.json();
+    if (d.ok) {
+      closeDelModal();
+      loadAirports();
+      if (d.errors && d.errors.length) {
+        alert('已删除, 但有警告:\n' + d.errors.join('\n'));
+      }
+    } else {
+      alert(d.error || '删除失败');
+    }
+  } catch(e) {
+    alert('Error: ' + e);
+  }
+  btn.disabled = false;
+  btn.textContent = '删除';
+}
+
+// Highlight nav
+document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+
+loadAirports();
+</script>
+{% endblock %}
