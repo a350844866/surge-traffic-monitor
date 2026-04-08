@@ -12,6 +12,7 @@
 - **可疑域名检测**：启发式规则（高 Shannon 熵 / 裸 IP / DGA 特征）+ 本地黑名单双层检测，自动标记高危 / 中危 / 低危条目
 - **智能白名单**：信任父域名表 + 信任 ASN 机构表，命中则自动 dismiss；裸 IP 通过 ip-api.com 查 ASN 后自动匹配信任机构
 - **AI 一键审查**：点击按钮让 AI 批量审查当前告警，自动 dismiss 误报、保留真正可疑项，支持切换模型
+- **机场管理**：Web UI 一键添加/删除代理机场订阅，自动转换节点格式、生成策略组、修改 Surge 配置；内置定时更新与 Basic Auth 文件服务
 - **流量异常下钻**：点击总览趋势图的任意时间柱，弹出该小时（或当天）的域名/设备上传排行，快速定位流量突增原因
 - **灵活时间筛选**：今天 / 近 7 天 / 近 30 天 / 本月 / 自定义区间
 
@@ -26,6 +27,8 @@
 | `/domain/<host>` | 域名详情：访问该域名的设备分布 |
 | `/policies` | 策略分析：规则组饼图 + 排行 |
 | `/policy_group/<name>` | 策略组详情：相关域名和设备 |
+| `/airports` | 机场管理：查看已订阅机场列表、添加/删除机场、手动刷新节点 |
+| `/sub/<name>_surge.txt` | 节点文件服务（内网免认证，外网需 Basic Auth） |
 | `/suspicious` | 可疑域名：筛选排序、ASN 分析、AI 一键审查、白名单管理 |
 
 ## 系统架构
@@ -41,8 +44,10 @@ Linux 服务器
   ├── collector.py      → MySQL surge_traffic（每 30s 采集 + 每 5min 设备同步）
   ├── detector.py       → 可疑域名检测（随采集器每 30s 自动运行）
   ├── update_blocklist.py → 每天 03:00 更新域名黑名单（URLhaus + StevenBlack）
+  ├── update_airports.py → 每 6h 自动刷新机场订阅节点
   └── web.py (Flask :8866)
-        └── Dashboard + AI 分析 + 可疑域名管理 API
+        ├── Dashboard + AI 分析 + 可疑域名管理 API
+        └── 机场管理 + 节点文件服务 (/sub/)
 ```
 
 ## 部署备注
@@ -242,6 +247,61 @@ python3 ensure_request_partitions.py
 ```
 
 该脚本会补齐 `requests` 表未来数月的月分区，避免新数据长期落入 `p_future`。
+
+## 机场管理
+
+通过 Web UI 管理 Surge 代理机场订阅，自动完成节点转换、策略组生成和配置同步。
+
+### 工作流程
+
+**添加机场：**
+1. 在 `/airports` 页面输入机场名称和原始订阅链接
+2. 系统通过本地 subconverter 将订阅转换为 Surge 格式
+3. 自动修复已知格式问题（hysteria→hysteria2、参数间距等）
+4. 生成 9 个策略组（select / urltest / 6 个地区节点 / OpenAI 专用）
+5. 将新机场注册到所有聚合策略组（故障转移、节点选择、手动切换等）
+6. 同时更新内网版和公网版 Surge 配置文件
+
+**删除机场：**
+- 一键删除节点文件、从所有策略组中移除引用、清理配置文件
+
+### 节点文件服务
+
+Flask 在 `/sub/<name>_surge.txt` 提供节点文件下载，Surge 的 `policy-path` 直接指向此地址：
+- **内网**：`http://<host>:8866/sub/<name>_surge.txt`（免认证）
+- **公网**：通过反向代理 + Basic Auth 暴露，Surge 支持在 URL 中嵌入认证信息
+
+### 自动更新
+
+容器内 cron 每 6 小时运行 `update_airports.py`，刷新所有 `auto_update=true` 的机场节点。
+
+### 配置
+
+在 `.env` 中添加：
+
+```bash
+# subconverter 地址（用于订阅转换）
+SUBCONVERTER_URL=http://127.0.0.1:25500
+# 节点文件存储目录（需在 docker-compose.yml 中挂载）
+SUB_STORE_PATH=/data/sub-store
+# Surge 配置文件目录和文件名
+SURGE_CONF_DIR=/Users/xxx/Library/Mobile Documents/iCloud~com~nssurge~inc/Documents
+SURGE_CONF_INTERNAL=your-config.conf
+SURGE_CONF_PUBLIC=your-config-public.conf
+# 节点文件的 URL 基路径
+AIRPORT_INTERNAL_BASE=http://127.0.0.1:8866/sub
+AIRPORT_PUBLIC_BASE=https://user:pass@your-domain.com/files
+# 文件服务 Basic Auth（外网访问时需要）
+AIRPORT_FILE_AUTH_USER=surge
+AIRPORT_FILE_AUTH_PASS=your_password
+```
+
+Docker Compose 需要挂载存储目录：
+
+```yaml
+volumes:
+  - /data/sub-store:/data/sub-store
+```
 
 ## AI 功能
 
