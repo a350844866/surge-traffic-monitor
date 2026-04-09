@@ -94,17 +94,86 @@
 {% block scripts %}
 <script>
 let airports = {};
+let nodeStatus = {};
 let deletingName = '';
 
 async function loadAirports() {
   const el = document.getElementById('airport-list');
   try {
-    const r = await fetch('/api/airports');
-    airports = await r.json();
+    const [airRes, statusRes] = await Promise.all([
+      fetch('/api/airports'),
+      fetch('/api/airports/node-status'),
+    ]);
+    airports = await airRes.json();
+    nodeStatus = statusRes.ok ? await statusRes.json() : {};
     renderAirports();
     populateInsertAfter();
   } catch(e) {
     el.innerHTML = '<p style="color:#f87171">加载失败</p>';
+  }
+}
+
+function latencyColor(ms) {
+  if (ms <= 0) return '#6b7280';
+  if (ms < 150) return '#34d399';
+  if (ms < 300) return '#fbbf24';
+  return '#f87171';
+}
+
+function latencyBar(alive, timeout, total) {
+  if (!total) return '';
+  const pct = Math.round(alive / total * 100);
+  const alivePct = (alive / total * 100).toFixed(1);
+  const timeoutPct = (timeout / total * 100).toFixed(1);
+  const barColor = pct >= 80 ? '#34d399' : pct >= 50 ? '#fbbf24' : '#f87171';
+  return `
+    <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+      <div style="flex:1;height:6px;background:#1e293b;border-radius:3px;overflow:hidden;max-width:180px">
+        <div style="width:${alivePct}%;height:100%;background:${barColor};border-radius:3px"></div>
+      </div>
+      <span style="font-size:12px;color:${barColor};font-weight:600">${alive}/${total}</span>
+      <span style="font-size:11px;color:#64748b">可用</span>
+      ${timeout > 0 ? `<span style="font-size:11px;color:#f87171">${timeout} 超时</span>` : ''}
+    </div>`;
+}
+
+function nodeTable(name, nodes) {
+  if (!nodes || !nodes.length) return '<div style="color:#64748b;font-size:12px;padding:8px 0">无节点数据</div>';
+  let html = `<div id="nodes-${name}" style="display:none;margin-top:10px">
+    <table style="width:100%;font-size:12px;border-collapse:collapse">
+      <thead><tr style="color:#64748b;text-align:left;border-bottom:1px solid #1e293b">
+        <th style="padding:4px 8px">状态</th>
+        <th style="padding:4px 8px">节点名称</th>
+        <th style="padding:4px 8px">协议</th>
+        <th style="padding:4px 8px;text-align:right">延迟</th>
+      </tr></thead><tbody>`;
+  for (const n of nodes) {
+    const dot = n.status === 'alive'
+      ? '<span style="color:#34d399">●</span>'
+      : '<span style="color:#ef4444">●</span>';
+    const lat = n.latency > 0 ? `<span style="color:${latencyColor(n.latency)}">${n.latency}ms</span>` : '<span style="color:#6b7280">—</span>';
+    const errTip = n.error ? ` title="${n.error.replace(/"/g,'&quot;')}"` : '';
+    html += `<tr style="border-bottom:1px solid #111827"${errTip}>
+      <td style="padding:3px 8px">${dot}</td>
+      <td style="padding:3px 8px;color:#cbd5e1;font-family:monospace">${n.name}</td>
+      <td style="padding:3px 8px;color:#64748b">${n.type}</td>
+      <td style="padding:3px 8px;text-align:right">${lat}</td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+  return html;
+}
+
+function toggleNodes(name) {
+  const el = document.getElementById('nodes-' + name);
+  const btn = document.getElementById('toggle-' + name);
+  if (!el) return;
+  if (el.style.display === 'none') {
+    el.style.display = 'block';
+    btn.textContent = '收起节点';
+  } else {
+    el.style.display = 'none';
+    btn.textContent = '展开节点';
   }
 }
 
@@ -119,31 +188,36 @@ function renderAirports() {
   let html = '<div style="display:grid;gap:16px">';
   for (const name of names) {
     const a = airports[name];
+    const s = nodeStatus[name] || {};
     const mtime = a.file_mtime ? new Date(a.file_mtime * 1000).toLocaleString('zh-CN') : '-';
-    const refreshed = a.last_refreshed || '-';
     const autoTag = a.auto_update
       ? '<span style="color:#34d399;font-size:11px">自动更新</span>'
       : '<span style="color:#64748b;font-size:11px">手动</span>';
 
     html += `
-    <div class="panel" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
-      <div style="flex:1;min-width:200px">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
-          <span style="font-size:16px;font-weight:600;color:#f1f5f9">${a.display_name || name}</span>
-          <span style="font-size:12px;color:#64748b;font-family:monospace">${name}</span>
-          ${autoTag}
+    <div class="panel" style="padding-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+        <div style="flex:1;min-width:200px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+            <span style="font-size:16px;font-weight:600;color:#f1f5f9">${a.display_name || name}</span>
+            <span style="font-size:12px;color:#64748b;font-family:monospace">${name}</span>
+            ${autoTag}
+          </div>
+          <div style="font-size:12px;color:#64748b;display:flex;gap:16px;flex-wrap:wrap">
+            <span>节点: <b style="color:#a78bfa">${a.node_count || 0}</b></span>
+            <span>文件更新: ${mtime}</span>
+            ${a.file_exists ? '<span style="color:#34d399">文件正常</span>' : '<span style="color:#f87171">文件缺失</span>'}
+          </div>
+          ${s.total ? latencyBar(s.alive, s.timeout, s.total) : ''}
         </div>
-        <div style="font-size:12px;color:#64748b;display:flex;gap:16px;flex-wrap:wrap">
-          <span>节点: <b style="color:#a78bfa">${a.node_count || 0}</b></span>
-          <span>文件更新: ${mtime}</span>
-          ${a.file_exists ? '<span style="color:#34d399">文件正常</span>' : '<span style="color:#f87171">文件缺失</span>'}
+        <div style="display:flex;gap:8px;align-items:center">
+          ${s.total ? `<button id="toggle-${name}" onclick="toggleNodes('${name}')" class="range-btn" style="font-size:11px">展开节点</button>` : ''}
+          <button onclick="refreshAirport('${name}')" class="range-btn" id="refresh-${name}">刷新节点</button>
+          <button onclick="showDelModal('${name}','${a.display_name||name}')"
+            class="range-btn" style="border-color:#991b1b;color:#fca5a5">删除</button>
         </div>
       </div>
-      <div style="display:flex;gap:8px">
-        <button onclick="refreshAirport('${name}')" class="range-btn" id="refresh-${name}">刷新节点</button>
-        <button onclick="showDelModal('${name}','${a.display_name||name}')"
-          class="range-btn" style="border-color:#991b1b;color:#fca5a5">删除</button>
-      </div>
+      ${s.nodes ? nodeTable(name, s.nodes) : ''}
     </div>`;
   }
   html += '</div>';

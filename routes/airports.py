@@ -505,3 +505,90 @@ def refresh_airport(name):
     info["last_refreshed"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     _save_airports(airports)
     return jsonify({"ok": True, "node_count": node_count})
+
+
+# ── Node status via Surge API ─────────────────────────────────
+SURGE_API = f"http://127.0.0.1:{config.SURGE_API_LOCAL_PORT}"
+SURGE_HEADERS = {"X-Key": config.SURGE_API_KEY}
+
+
+@bp.route("/api/airports/node-status")
+def airport_node_status():
+    """Return per-airport node status (latency, availability) from Surge API."""
+    airports = _load_airports()
+    if not airports:
+        return jsonify({})
+
+    # Fetch policy groups and benchmark results from Surge in parallel
+    try:
+        groups_resp = requests.get(
+            f"{SURGE_API}/v1/policy_groups", headers=SURGE_HEADERS, timeout=5,
+        )
+        groups_resp.raise_for_status()
+        groups = groups_resp.json()
+    except Exception as e:
+        log.warning("Failed to fetch policy_groups: %s", e)
+        return jsonify({"error": f"Surge API unavailable: {e}"}), 502
+
+    try:
+        bench_resp = requests.get(
+            f"{SURGE_API}/v1/policies/benchmark_results",
+            headers=SURGE_HEADERS, timeout=5,
+        )
+        bench_resp.raise_for_status()
+        benchmarks = bench_resp.json()
+    except Exception as e:
+        log.warning("Failed to fetch benchmark_results: %s", e)
+        benchmarks = {}
+
+    result = {}
+    for name in airports:
+        # Each airport has a urltest group: <name>-urltest
+        group_key = f"{name}-urltest"
+        nodes = groups.get(group_key, [])
+        if not nodes:
+            # Try select group as fallback
+            nodes = groups.get(f"{name}-select", [])
+
+        node_list = []
+        alive = 0
+        timeout_count = 0
+        total = 0
+
+        for n in nodes:
+            if n.get("isGroup"):
+                continue
+            total += 1
+            line_hash = n.get("lineHash", "")
+            bench = benchmarks.get(line_hash, {})
+            latency = bench.get("lastTestScoreInMS", -1)
+            error_msg = bench.get("lastTestErrorMessage")
+
+            if latency > 0 and not error_msg:
+                status = "alive"
+                alive += 1
+            elif latency == -1 or error_msg:
+                status = "timeout"
+                timeout_count += 1
+            else:
+                status = "unknown"
+
+            node_list.append({
+                "name": n.get("name", ""),
+                "type": n.get("typeDescription", ""),
+                "latency": latency,
+                "status": status,
+                "error": error_msg,
+            })
+
+        # Sort: alive first (by latency asc), then timeout
+        node_list.sort(key=lambda x: (x["status"] != "alive", x["latency"] if x["latency"] > 0 else 99999))
+
+        result[name] = {
+            "total": total,
+            "alive": alive,
+            "timeout": timeout_count,
+            "nodes": node_list,
+        }
+
+    return jsonify(result)
