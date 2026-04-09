@@ -21,6 +21,7 @@ from functools import wraps
 from pathlib import Path
 from urllib.parse import quote as urlquote
 
+import redis as _redis
 import requests
 from flask import (Blueprint, Response, abort, jsonify, render_template,
                    request, send_from_directory)
@@ -29,6 +30,8 @@ import config
 
 bp = Blueprint("airports", __name__)
 log = logging.getLogger("airports")
+rds = _redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT,
+                   db=config.REDIS_DB, decode_responses=True)
 
 SUB_STORE = Path(config.SUB_STORE_PATH)
 AIRPORTS_JSON = SUB_STORE / "airports.json"
@@ -603,8 +606,7 @@ def airport_node_status():
 
 # ── Entry IP analysis ─────────────────────────────────────────
 
-_entry_cache = {}
-_entry_cache_ts = 0
+_ENTRY_CACHE_KEY = "surge:airport:entry_ip"
 _ENTRY_CACHE_TTL = 86400  # 24 hours
 
 
@@ -641,10 +643,11 @@ def _resolve_via_doh(hostname):
 @bp.route("/api/airports/entry-ip")
 def airport_entry_ip():
     """Resolve entry IPs for each airport and return geolocation + relay/direct tag."""
-    global _entry_cache, _entry_cache_ts
     force = request.args.get("refresh") == "1"
-    if not force and time.time() - _entry_cache_ts < _ENTRY_CACHE_TTL and _entry_cache:
-        return jsonify(_entry_cache)
+    if not force:
+        cached = rds.get(_ENTRY_CACHE_KEY)
+        if cached:
+            return Response(cached, mimetype="application/json")
 
     airports = _load_airports()
     if not airports:
@@ -718,6 +721,5 @@ def airport_entry_ip():
             "entries": entries,
         }
 
-    _entry_cache = result
-    _entry_cache_ts = time.time()
+    rds.setex(_ENTRY_CACHE_KEY, _ENTRY_CACHE_TTL, json.dumps(result, ensure_ascii=False))
     return jsonify(result)

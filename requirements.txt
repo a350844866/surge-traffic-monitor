@@ -3,3 +3,4 @@ pymysql>=1.1
 requests>=2.31
 dbutils>=3.0
 python-dotenv>=1.0
+redis>=5.0
