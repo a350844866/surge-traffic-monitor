@@ -564,14 +564,14 @@ def airport_node_status():
             latency = bench.get("lastTestScoreInMS", -1)
             error_msg = bench.get("lastTestErrorMessage")
 
-            if latency > 0 and not error_msg:
+            # Surge considers a node reachable if lastTestScoreInMS > 0,
+            # even when there's an error like "超时（等待 HTTP 响应）"
+            if latency > 0:
                 status = "alive"
                 alive += 1
-            elif latency == -1 or error_msg:
+            else:
                 status = "timeout"
                 timeout_count += 1
-            else:
-                status = "unknown"
 
             node_list.append({
                 "name": n.get("name", ""),
