@@ -95,6 +95,7 @@
 <script>
 let airports = {};
 let nodeStatus = {};
+let entryInfo = {};
 let deletingName = '';
 
 async function loadAirports() {
@@ -108,9 +109,81 @@ async function loadAirports() {
     nodeStatus = statusRes.ok ? await statusRes.json() : {};
     renderAirports();
     populateInsertAfter();
+    // Load entry-ip in background (slower due to DNS + geo lookup)
+    fetch('/api/airports/entry-ip').then(r => r.ok ? r.json() : {}).then(d => {
+      entryInfo = d;
+      renderEntryBadges();
+    }).catch(e => console.warn('entry-ip fetch failed:', e));
   } catch(e) {
     el.innerHTML = '<p style="color:#f87171">加载失败</p>';
   }
+}
+
+function renderEntryBadges() {
+  for (const name of Object.keys(airports)) {
+    const el = document.getElementById('entry-' + name);
+    if (!el) continue;
+    const info = entryInfo[name];
+    if (!info) continue;
+    el.innerHTML = entryBadgeHtml(name, info);
+  }
+}
+
+function entryBadgeHtml(name, info) {
+  const isRelay = info.type === 'relay';
+  const tagColor = isRelay ? '#fbbf24' : '#60a5fa';
+  const tagBg = isRelay ? '#422006' : '#172554';
+  const tagBorder = isRelay ? '#92400e' : '#1e3a5f';
+  const tagText = isRelay ? '中转' : '直连';
+
+  // Summarize unique entry locations
+  const locs = {};
+  for (const e of info.entries) {
+    if (!e.ip || e.ip === '127.0.0.1') continue;
+    const label = e.country === 'China'
+      ? (e.region || '中国') + ' ' + _shortIsp(e.isp)
+      : (e.region || e.country);
+    locs[label] = (locs[label] || 0) + 1;
+  }
+  const locSummary = Object.keys(locs).slice(0, 4).join(' / ');
+
+  return `<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;margin-top:4px">
+    <span style="background:${tagBg};border:1px solid ${tagBorder};color:${tagColor};
+      padding:1px 8px;border-radius:4px;font-size:11px;font-weight:600">${tagText}</span>
+    <span style="color:#94a3b8">${locSummary}</span>
+    <button onclick="toggleEntryDetail('${name}')" style="background:none;border:none;color:#64748b;
+      cursor:pointer;font-size:11px;padding:0">▸ 详情</button>
+  </span>
+  <div id="entry-detail-${name}" style="display:none;margin-top:6px;font-size:11px;color:#94a3b8">
+    ${info.entries.filter(e => e.ip !== '127.0.0.1').map(e => {
+      const flag = e.country === 'China' ? '🇨🇳' : '';
+      return `<div style="display:flex;gap:12px;padding:2px 0">
+        <span style="color:#64748b;font-family:monospace;min-width:120px">${e.ip}</span>
+        <span>${flag} ${e.region || e.country} ${_shortIsp(e.isp)}</span>
+        <span style="color:#475569">${e.host}</span>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+function _shortIsp(isp) {
+  if (!isp) return '';
+  return isp
+    .replace(/China Mobile communications? corporation/i, '移动')
+    .replace(/China Mobile Communications Corporation/i, '移动')
+    .replace(/CNC Group CHINA169.*$/i, '联通')
+    .replace(/China Unicom.*$/i, '联通')
+    .replace(/Chinanet/i, '电信')
+    .replace(/China Telecom.*$/i, '电信')
+    .replace(/Amazon\.com,? Inc\.?/i, 'AWS')
+    .replace(/Amazon Technologies? Inc\.?/i, 'AWS')
+    .replace(/Shenzhen lesuyun.*$/i, '乐速云')
+    .replace(/PCCW.*$/i, 'PCCW');
+}
+
+function toggleEntryDetail(name) {
+  const el = document.getElementById('entry-detail-' + name);
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 
 function latencyColor(ms) {
@@ -209,6 +282,9 @@ function renderAirports() {
             ${a.file_exists ? '<span style="color:#34d399">文件正常</span>' : '<span style="color:#f87171">文件缺失</span>'}
           </div>
           ${s.total ? latencyBar(s.alive, s.timeout, s.total) : ''}
+          <div id="entry-${name}" style="min-height:20px">
+            <span style="font-size:11px;color:#475569">入口分析中...</span>
+          </div>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           ${s.total ? `<button id="toggle-${name}" onclick="toggleNodes('${name}')" class="range-btn" style="font-size:11px">展开节点</button>` : ''}

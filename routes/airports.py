@@ -592,3 +592,124 @@ def airport_node_status():
         }
 
     return jsonify(result)
+
+
+# ── Entry IP analysis ─────────────────────────────────────────
+
+_entry_cache = {}
+_entry_cache_ts = 0
+_ENTRY_CACHE_TTL = 3600  # 1 hour
+
+
+def _parse_entry_hosts(node_text):
+    """Extract unique server hostnames/IPs from Surge proxy-list text."""
+    hosts = set()
+    for line in node_text.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        # Format: "Name = proto, server, port, ..."
+        after_eq = line.split("=", 1)[1].strip()
+        parts = [p.strip() for p in after_eq.split(",")]
+        if len(parts) >= 2:
+            hosts.add(parts[1])
+    return sorted(hosts)
+
+
+def _resolve_via_doh(hostname):
+    """Resolve hostname via DNS-over-HTTPS (Google) to bypass Surge fake-ip."""
+    try:
+        r = requests.get(
+            "https://dns.google/resolve",
+            params={"name": hostname, "type": "A"},
+            timeout=5,
+        )
+        answers = r.json().get("Answer", [])
+        ips = [a["data"] for a in answers if a.get("type") == 1]
+        return ips[-1] if ips else None
+    except Exception:
+        return None
+
+
+@bp.route("/api/airports/entry-ip")
+def airport_entry_ip():
+    """Resolve entry IPs for each airport and return geolocation + relay/direct tag."""
+    global _entry_cache, _entry_cache_ts
+    if time.time() - _entry_cache_ts < _ENTRY_CACHE_TTL and _entry_cache:
+        return jsonify(_entry_cache)
+
+    airports = _load_airports()
+    if not airports:
+        return jsonify({})
+
+    # Collect all unique hosts across airports
+    airport_hosts = {}
+    all_hosts = set()
+    for name in airports:
+        fpath = SUB_STORE / f"{name}_surge.txt"
+        if not fpath.exists():
+            continue
+        hosts = _parse_entry_hosts(fpath.read_text("utf-8"))
+        airport_hosts[name] = hosts
+        all_hosts.update(hosts)
+
+    # Resolve all unique hosts via DoH
+    host_to_ip = {}
+    for h in all_hosts:
+        # Check if already an IP
+        try:
+            import ipaddress as _ipa
+            _ipa.ip_address(h)
+            host_to_ip[h] = h
+        except ValueError:
+            ip = _resolve_via_doh(h)
+            if ip:
+                host_to_ip[h] = ip
+
+    # Batch query ip-api.com for geolocation (max 100 per batch)
+    unique_ips = list(set(host_to_ip.values()))
+    ip_geo = {}
+    for i in range(0, len(unique_ips), 100):
+        batch = unique_ips[i:i + 100]
+        try:
+            r = requests.post(
+                "http://ip-api.com/batch?fields=query,country,regionName,isp,org",
+                json=[{"query": ip} for ip in batch],
+                timeout=10,
+            )
+            for item in r.json():
+                ip_geo[item["query"]] = item
+        except Exception as e:
+            log.warning("ip-api.com batch failed: %s", e)
+
+    # Build per-airport result
+    result = {}
+    for name, hosts in airport_hosts.items():
+        entries = []
+        seen_ips = set()
+        for h in hosts:
+            ip = host_to_ip.get(h)
+            if not ip or ip in seen_ips:
+                continue
+            seen_ips.add(ip)
+            geo = ip_geo.get(ip, {})
+            country = geo.get("country", "")
+            is_cn = country == "China"
+            entries.append({
+                "host": h,
+                "ip": ip,
+                "region": geo.get("regionName", ""),
+                "isp": geo.get("isp", ""),
+                "country": country,
+            })
+
+        # Determine relay vs direct: if ANY entry IP is in China → relay
+        has_cn = any(e["country"] == "China" for e in entries)
+        result[name] = {
+            "type": "relay" if has_cn else "direct",
+            "entries": entries,
+        }
+
+    _entry_cache = result
+    _entry_cache_ts = time.time()
+    return jsonify(result)
