@@ -10,12 +10,26 @@ import time
 from datetime import date, datetime, timedelta
 
 import requests as http_requests
-from flask import Response, request, stream_with_context
+from flask import Response, g, request, stream_with_context
 
 import config
 from db import get_db
 
 log = logging.getLogger("dashboard")
+
+
+def get_request_db():
+    """Get a DB connection scoped to the current request. Auto-closed on teardown."""
+    if "db" not in g:
+        g.db = get_db()
+    return g.db
+
+
+def close_request_db(exc=None):
+    """Teardown handler: close the request-scoped DB connection if opened."""
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
 
 _rule_map_cache = {}
 _rule_map_expires = 0

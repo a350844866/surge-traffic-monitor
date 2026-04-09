@@ -143,6 +143,9 @@ DB_POOL_MAX_CONNECTIONS=10
 # OpenRouter AI（不需要可留空）
 OPENROUTER_API_KEY=sk-or-v1-...
 OPENROUTER_MODEL=minimax/minimax-m2.7
+
+# 可选：API Key 认证（留空则所有接口开放）
+API_KEY=your_random_secret
 ```
 
 推荐将这些值放入项目目录下的 `.env` 文件；`config.py` / `config.example.py` 会自动读取。由于旧版 `config.py` 可能已经暴露过明文凭据，迁移后请自行轮换相关密码和 API Key。
@@ -219,12 +222,15 @@ WantedBy=timers.target
 
 **Dashboard**（`/etc/systemd/system/surge-dashboard.service`）：
 
+推荐使用 gunicorn 替代 Flask 内置 dev server：
+
 ```ini
 [Unit]
 Description=Surge Traffic Dashboard
 
 [Service]
-ExecStart=/usr/bin/python3 /path/to/web.py
+ExecStart=/usr/bin/gunicorn -w 4 -b 0.0.0.0:8866 web:app
+WorkingDirectory=/path/to/surge-monitor
 User=root
 Restart=always
 
@@ -317,6 +323,7 @@ volumes:
 
 ## 安全加固
 
+- **API Key 认证**：设置 `API_KEY` 环境变量后，机场管理、AI 分析、可疑域名操作等敏感接口需要在请求头中携带 `X-API-Key`（或 `?api_key=` 查询参数）。不配置则保持开放访问
 - **SSH 操作**：使用 `sshpass -f` 临时密码文件（0600 权限），不再在命令行明文传递密码；`subprocess` 以列表参数调用，禁止 shell 注入
 - **文件服务**：`/sub/<filename>` 路由对解析后的路径做 `resolve()` + 边界校验，防止路径穿越
 - **认证**：Basic Auth 使用 `hmac.compare_digest()` 常量时间比较，记录失败日志

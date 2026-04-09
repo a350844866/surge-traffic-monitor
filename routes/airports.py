@@ -10,6 +10,7 @@ File serving:
 """
 
 import hmac
+import ipaddress as _ipa
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ import re
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
 from pathlib import Path
 from urllib.parse import quote as urlquote
@@ -68,7 +70,6 @@ def serve_node_file(filename):
     # Check if request comes from LAN (no auth needed) or external (auth needed)
     remote = request.remote_addr or ""
     try:
-        import ipaddress as _ipa
         is_lan = _ipa.ip_address(remote).is_private
     except ValueError:
         is_lan = False
@@ -144,14 +145,11 @@ def _fetch_nodes_via_proxy(raw_url):
 
 def _write_pass_file():
     """Write SSH password to a secure temp file for sshpass -f."""
-    fd = os.open(
-        os.path.join(tempfile.gettempdir(), f"_ssh_pw_{os.getpid()}"),
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-        0o600,
-    )
+    path = os.path.join(tempfile.gettempdir(), f"_ssh_pw_{os.getpid()}")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(config.SURGE_SSH_PASS)
-    return f"/tmp/_ssh_pw_{os.getpid()}"
+    return path
 
 
 _SSH_OPTS = [
@@ -715,18 +713,24 @@ def airport_entry_ip():
         airport_hosts[name] = hosts
         all_hosts.update(hosts)
 
-    # Resolve all unique hosts via DoH
+    # Resolve all unique hosts via DoH (parallel)
     host_to_ip = {}
+    hosts_to_resolve = []
     for h in all_hosts:
-        # Check if already an IP
         try:
-            import ipaddress as _ipa
             _ipa.ip_address(h)
             host_to_ip[h] = h
         except ValueError:
-            ip = _resolve_via_doh(h)
-            if ip:
-                host_to_ip[h] = ip
+            hosts_to_resolve.append(h)
+
+    if hosts_to_resolve:
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(_resolve_via_doh, h): h for h in hosts_to_resolve}
+            for future in as_completed(futures):
+                h = futures[future]
+                ip = future.result()
+                if ip:
+                    host_to_ip[h] = ip
 
     # Batch query ip-api.com for geolocation (max 100 per batch)
     unique_ips = list(set(host_to_ip.values()))

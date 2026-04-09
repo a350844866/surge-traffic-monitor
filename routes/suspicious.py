@@ -3,9 +3,8 @@ import time as _time
 
 from flask import Blueprint, jsonify, request
 
-from db import get_db
 from detector import check_domains_blocklist, check_new_domains_heuristic
-from web_common import log
+from web_common import get_request_db, log
 import requests as http_requests
 
 bp = Blueprint("suspicious", __name__)
@@ -13,22 +12,19 @@ bp = Blueprint("suspicious", __name__)
 
 @bp.route("/api/suspicious/count")
 def api_suspicious_count():
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(severity='high') AS high,
-                    SUM(severity='medium') AS medium,
-                    SUM(severity='low') AS low,
-                    SUM(severity='high' AND persistence_score >= 30) AS confirmed
-                FROM suspicious_domains
-                WHERE dismissed=0
-            """)
-            row = cur.fetchone()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(severity='high') AS high,
+                SUM(severity='medium') AS medium,
+                SUM(severity='low') AS low,
+                SUM(severity='high' AND persistence_score >= 30) AS confirmed
+            FROM suspicious_domains
+            WHERE dismissed=0
+        """)
+        row = cur.fetchone()
     return jsonify({
         "count": int(row["total"] or 0),
         "high": int(row["high"] or 0),
@@ -41,41 +37,37 @@ def api_suspicious_count():
 @bp.route("/api/suspicious")
 def api_suspicious():
     show_dismissed = request.args.get("show_dismissed") == "1"
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            where = "" if show_dismissed else "WHERE dismissed=0"
-            cur.execute(f"""
-                SELECT host, detection_type, reason, severity,
-                       first_seen, last_seen, request_count, device_count,
-                       dismissed, dismissed_at, notes,
-                       active_days, consecutive_days, last_active_date,
-                       requests_7d, requests_prev_7d, bytes_7d,
-                       device_count_7d, persistence_score
-                FROM suspicious_domains
-                {where}
-                ORDER BY
-                    dismissed ASC,
-                    persistence_score DESC,
-                    FIELD(severity,'high','medium','low'),
-                    last_seen DESC
-            """)
-            rows = cur.fetchall()
+    db = get_request_db()
+    with db.cursor() as cur:
+        where = "" if show_dismissed else "WHERE dismissed=0"
+        cur.execute(f"""
+            SELECT host, detection_type, reason, severity,
+                   first_seen, last_seen, request_count, device_count,
+                   dismissed, dismissed_at, notes,
+                   active_days, consecutive_days, last_active_date,
+                   requests_7d, requests_prev_7d, bytes_7d,
+                   device_count_7d, persistence_score
+            FROM suspicious_domains
+            {where}
+            ORDER BY
+                dismissed ASC,
+                persistence_score DESC,
+                FIELD(severity,'high','medium','low'),
+                last_seen DESC
+        """)
+        rows = cur.fetchall()
 
-        ip_re = re.compile(r'^(\d{1,3}(?:\.\d{1,3}){3})(:\d+)?$')
-        ips = [ip_re.match(r["host"]).group(1) for r in rows if ip_re.match(r["host"])]
-        asn_map = {}
-        if ips:
-            placeholders = ",".join(["%s"] * len(ips))
-            with db.cursor() as cur:
-                cur.execute(f"SELECT ip, asn, org, country FROM ip_asn_cache WHERE ip IN ({placeholders})", ips)
-                for row in cur.fetchall():
-                    asn_map[row["ip"]] = row
-    finally:
-        db.close()
+    ip_re = re.compile(r'^(\d{1,3}(?:\.\d{1,3}){3})(:\d+)?$')
+    ips = [ip_re.match(r["host"]).group(1) for r in rows if ip_re.match(r["host"])]
+    asn_map = {}
+    if ips:
+        placeholders = ",".join(["%s"] * len(ips))
+        with db.cursor() as cur:
+            cur.execute(f"SELECT ip, asn, org, country FROM ip_asn_cache WHERE ip IN ({placeholders})", ips)
+            for row in cur.fetchall():
+                asn_map[row["ip"]] = row
 
     result = []
-    ip_re = re.compile(r'^(\d{1,3}(?:\.\d{1,3}){3})(:\d+)?$')
     for row in rows:
         item = {
             **row,
@@ -99,48 +91,39 @@ def api_suspicious():
 def api_suspicious_dismiss(host):
     data = request.get_json(force=True, silent=True) or {}
     notes = (data.get("notes") or "").strip()[:1024] or None
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute(
-                "UPDATE suspicious_domains SET dismissed=1, dismissed_at=NOW(), notes=%s WHERE host=%s",
-                (notes, host),
-            )
-        db.commit()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE suspicious_domains SET dismissed=1, dismissed_at=NOW(), notes=%s WHERE host=%s",
+            (notes, host),
+        )
+    db.commit()
     return jsonify({"ok": True})
 
 
 @bp.route("/api/suspicious/<path:host>/restore", methods=["POST"])
 def api_suspicious_restore(host):
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute(
-                "UPDATE suspicious_domains SET dismissed=0, dismissed_at=NULL WHERE host=%s",
-                (host,),
-            )
-        db.commit()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE suspicious_domains SET dismissed=0, dismissed_at=NULL WHERE host=%s",
+            (host,),
+        )
+    db.commit()
     return jsonify({"ok": True})
 
 
 @bp.route("/api/suspicious/scan", methods=["POST"])
 def api_suspicious_scan():
-    db = get_db()
-    try:
-        heuristic_count = check_new_domains_heuristic(db)
-        blocklist_count = check_domains_blocklist(db)
-    finally:
-        db.close()
+    db = get_request_db()
+    heuristic_count = check_new_domains_heuristic(db)
+    blocklist_count = check_domains_blocklist(db)
     return jsonify({"ok": True, "new_flags": heuristic_count + blocklist_count})
 
 
 @bp.route("/api/suspicious/enrich-ips", methods=["POST"])
 def api_suspicious_enrich_ips():
-    db = get_db()
+    db = get_request_db()
     try:
         with db.cursor() as cur:
             cur.execute("""
@@ -155,7 +138,6 @@ def api_suspicious_enrich_ips():
             """)
             ips = [row["ip"] for row in cur.fetchall() if row["ip"]]
     except Exception as exc:
-        db.close()
         return jsonify({"ok": False, "error": str(exc)}), 500
 
     enriched = 0
@@ -205,21 +187,16 @@ def api_suspicious_enrich_ips():
     except Exception as exc:
         log.warning("Auto-dismiss by ASN failed: %s", exc)
         auto_dismissed = 0
-    finally:
-        db.close()
 
     return jsonify({"ok": True, "enriched": enriched, "auto_dismissed": auto_dismissed})
 
 
 @bp.route("/api/trusted/domains", methods=["GET"])
 def api_trusted_domains_list():
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("SELECT id, pattern, reason, added_at FROM trusted_parent_domains ORDER BY added_at DESC")
-            rows = cur.fetchall()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("SELECT id, pattern, reason, added_at FROM trusted_parent_domains ORDER BY added_at DESC")
+        rows = cur.fetchall()
     return jsonify([{**r, "added_at": r["added_at"].isoformat()} for r in rows])
 
 
@@ -230,50 +207,41 @@ def api_trusted_domains_add():
     reason = (data.get("reason") or "").strip()[:512]
     if not pattern:
         return jsonify({"ok": False, "error": "pattern required"}), 400
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute(
-                "INSERT INTO trusted_parent_domains (pattern, reason) VALUES (%s, %s) AS new "
-                "ON DUPLICATE KEY UPDATE reason=new.reason",
-                (pattern, reason),
-            )
-        db.commit()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO trusted_parent_domains (pattern, reason) VALUES (%s, %s) AS new "
+            "ON DUPLICATE KEY UPDATE reason=new.reason",
+            (pattern, reason),
+        )
+    db.commit()
     return jsonify({"ok": True, "pattern": pattern})
 
 
 @bp.route("/api/trusted/domains/<path:pattern>", methods=["DELETE"])
 def api_trusted_domains_delete(pattern):
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("DELETE FROM trusted_parent_domains WHERE pattern=%s", (pattern,))
-        db.commit()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM trusted_parent_domains WHERE pattern=%s", (pattern,))
+    db.commit()
     return jsonify({"ok": True})
 
 
 @bp.route("/api/trusted/asns", methods=["GET"])
 def api_trusted_asns_list():
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT ta.id, ta.asn, ta.org_name, ta.reason, ta.added_at,
-                    (SELECT COUNT(*) FROM suspicious_domains sd
-                     JOIN ip_asn_cache iac
-                         ON iac.ip = REGEXP_SUBSTR(sd.host, '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+')
-                     WHERE iac.asn = ta.asn AND sd.dismissed=1
-                    ) AS dismissed_count
-                FROM trusted_asns ta
-                ORDER BY ta.added_at DESC
-            """)
-            rows = cur.fetchall()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT ta.id, ta.asn, ta.org_name, ta.reason, ta.added_at,
+                (SELECT COUNT(*) FROM suspicious_domains sd
+                 JOIN ip_asn_cache iac
+                     ON iac.ip = REGEXP_SUBSTR(sd.host, '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+')
+                 WHERE iac.asn = ta.asn AND sd.dismissed=1
+                ) AS dismissed_count
+            FROM trusted_asns ta
+            ORDER BY ta.added_at DESC
+        """)
+        rows = cur.fetchall()
     return jsonify([{**r, "added_at": r["added_at"].isoformat()} for r in rows])
 
 
@@ -285,37 +253,31 @@ def api_trusted_asns_add():
     reason = (data.get("reason") or "").strip()[:512]
     if not asn:
         return jsonify({"ok": False, "error": "asn required"}), 400
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute(
-                "INSERT INTO trusted_asns (asn, org_name, reason) VALUES (%s,%s,%s) AS new "
-                "ON DUPLICATE KEY UPDATE org_name=new.org_name, reason=new.reason",
-                (asn, org_name, reason),
-            )
-            cur.execute("""
-                UPDATE suspicious_domains sd
-                JOIN ip_asn_cache iac
-                    ON iac.ip = REGEXP_SUBSTR(sd.host, '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+')
-                SET sd.dismissed=1, sd.dismissed_at=NOW(),
-                    sd.notes=CONCAT('[自动白名单] 信任机构: ', iac.org, ' (', iac.asn, ')')
-                WHERE sd.dismissed=0 AND iac.asn=%s
-                  AND sd.host REGEXP '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+'
-            """, (asn,))
-            dismissed = cur.rowcount
-        db.commit()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO trusted_asns (asn, org_name, reason) VALUES (%s,%s,%s) AS new "
+            "ON DUPLICATE KEY UPDATE org_name=new.org_name, reason=new.reason",
+            (asn, org_name, reason),
+        )
+        cur.execute("""
+            UPDATE suspicious_domains sd
+            JOIN ip_asn_cache iac
+                ON iac.ip = REGEXP_SUBSTR(sd.host, '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+')
+            SET sd.dismissed=1, sd.dismissed_at=NOW(),
+                sd.notes=CONCAT('[自动白名单] 信任机构: ', iac.org, ' (', iac.asn, ')')
+            WHERE sd.dismissed=0 AND iac.asn=%s
+              AND sd.host REGEXP '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+'
+        """, (asn,))
+        dismissed = cur.rowcount
+    db.commit()
     return jsonify({"ok": True, "asn": asn, "auto_dismissed": dismissed})
 
 
 @bp.route("/api/trusted/asns/<asn>", methods=["DELETE"])
 def api_trusted_asns_delete(asn):
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("DELETE FROM trusted_asns WHERE asn=%s", (asn.upper(),))
-        db.commit()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM trusted_asns WHERE asn=%s", (asn.upper(),))
+    db.commit()
     return jsonify({"ok": True})

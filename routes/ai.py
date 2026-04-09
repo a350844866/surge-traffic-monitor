@@ -5,7 +5,7 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 import config
 from db import get_db
-from web_common import build_time_window, fmt_bytes, parse_range, stream_openrouter
+from web_common import build_time_window, fmt_bytes, get_request_db, parse_range, stream_openrouter
 import requests as http_requests
 
 bp = Blueprint("ai", __name__)
@@ -19,28 +19,25 @@ def ai_device(mac):
     end = range_info["end"]
     start_dt = range_info["start_dt"]
     end_dt = range_info["end_dt"]
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("SELECT * FROM devices WHERE mac_address = %s", (mac,))
-            device = cur.fetchone()
-            cur.execute("""
-                SELECT
-                    remote_host AS host,
-                    SUM(in_bytes + out_bytes) AS total_bytes,
-                    COUNT(*) AS requests,
-                    MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL
-                             THEN 'DIRECT' ELSE 'PROXY' END) AS policy
-                FROM requests
-                WHERE mac_address = %s AND start_date >= %s AND start_date < %s
-                  AND remote_host IS NOT NULL AND remote_host != ''
-                GROUP BY remote_host
-                ORDER BY total_bytes DESC
-                LIMIT 60
-            """, (mac, start_dt, end_dt))
-            domains = cur.fetchall()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("SELECT * FROM devices WHERE mac_address = %s", (mac,))
+        device = cur.fetchone()
+        cur.execute("""
+            SELECT
+                remote_host AS host,
+                SUM(in_bytes + out_bytes) AS total_bytes,
+                COUNT(*) AS requests,
+                MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL
+                         THEN 'DIRECT' ELSE 'PROXY' END) AS policy
+            FROM requests
+            WHERE mac_address = %s AND start_date >= %s AND start_date < %s
+              AND remote_host IS NOT NULL AND remote_host != ''
+            GROUP BY remote_host
+            ORDER BY total_bytes DESC
+            LIMIT 60
+        """, (mac, start_dt, end_dt))
+        domains = cur.fetchall()
 
     if not domains:
         def empty():
@@ -134,56 +131,52 @@ def _build_suspicious_prompt(rows):
 def _run_ai_review_job(job_id, rows, model):
     entry_count = len(rows)
     prompt = _build_suspicious_prompt(rows)
+    db = get_db()
 
     try:
-        ai_resp = http_requests.post(
-            config.OPENROUTER_BASE_URL,
-            headers={
-                "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            },
-            timeout=120,
-        )
-        ai_resp.raise_for_status()
-        content = ai_resp.json()["choices"][0]["message"]["content"]
-    except Exception as exc:
-        db = get_db()
         try:
+            ai_resp = http_requests.post(
+                config.OPENROUTER_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                },
+                timeout=120,
+            )
+            ai_resp.raise_for_status()
+            content = ai_resp.json()["choices"][0]["message"]["content"]
+        except Exception as exc:
             with db.cursor() as cur:
                 cur.execute(
                     "UPDATE ai_review_jobs SET status='error', error_msg=%s, finished_at=NOW() WHERE id=%s",
                     (str(exc)[:1000], job_id),
                 )
             db.commit()
-        finally:
-            db.close()
-        return
+            return
 
-    dismissed_list = []
-    kept_list = []
-    ai_summary = ""
-    parse_error = None
-    try:
-        raw = content
-        if "```json" in raw:
-            raw = raw.split("```json")[1].split("```")[0]
-        elif "```" in raw:
-            raw = raw.split("```")[1].split("```")[0]
-        parsed = json.loads(raw.strip())
-        ai_summary = parsed.get("summary", "")
-
-        db2 = get_db()
+        dismissed_list = []
+        kept_list = []
+        ai_summary = ""
+        parse_error = None
         try:
+            raw = content
+            if "```json" in raw:
+                raw = raw.split("```json")[1].split("```")[0]
+            elif "```" in raw:
+                raw = raw.split("```")[1].split("```")[0]
+            parsed = json.loads(raw.strip())
+            ai_summary = parsed.get("summary", "")
+
             for decision in parsed.get("decisions", []):
                 host = decision.get("host", "")
                 reason = (decision.get("reason") or "")[:900]
                 if decision.get("action") == "DISMISS":
-                    with db2.cursor() as cur:
+                    with db.cursor() as cur:
                         cur.execute(
                             "UPDATE suspicious_domains SET dismissed=1, dismissed_at=NOW(), notes=%s WHERE host=%s AND dismissed=0",
                             ("[AI白名单] " + reason, host),
@@ -192,78 +185,71 @@ def _run_ai_review_job(job_id, rows, model):
                         dismissed_list.append((host, reason))
                 else:
                     kept_list.append((host, reason))
-            db2.commit()
-        finally:
-            db2.close()
-    except Exception as exc:
-        parse_error = str(exc)
+            db.commit()
+        except Exception as exc:
+            parse_error = str(exc)
 
-    md = "## 🤖 AI 安全审查结果\n\n"
-    md += f"共审查 **{entry_count}** 条告警\n\n"
-    if dismissed_list:
-        md += f"### ✅ 已标记安全（{len(dismissed_list)} 条）\n"
-        for host, reason in dismissed_list[:30]:
-            md += f"- `{host}` — {reason}\n"
-        if len(dismissed_list) > 30:
-            md += f"- _...及其他 {len(dismissed_list) - 30} 条_\n"
-        md += "\n"
-    if kept_list:
-        md += f"### ⚠️ 保留观察（{len(kept_list)} 条）\n"
-        for host, reason in kept_list:
-            md += f"- `{host}` — {reason}\n"
-        md += "\n"
-    if ai_summary:
-        md += f"### 总结\n{ai_summary}\n"
-    if parse_error:
-        md += f"\n> ⚠️ JSON 解析出错: {parse_error}\n> 原始响应片段: {content[:300]}\n"
+        md = "## 🤖 AI 安全审查结果\n\n"
+        md += f"共审查 **{entry_count}** 条告警\n\n"
+        if dismissed_list:
+            md += f"### ✅ 已标记安全（{len(dismissed_list)} 条）\n"
+            for host, reason in dismissed_list[:30]:
+                md += f"- `{host}` — {reason}\n"
+            if len(dismissed_list) > 30:
+                md += f"- _...及其他 {len(dismissed_list) - 30} 条_\n"
+            md += "\n"
+        if kept_list:
+            md += f"### ⚠️ 保留观察（{len(kept_list)} 条）\n"
+            for host, reason in kept_list:
+                md += f"- `{host}` — {reason}\n"
+            md += "\n"
+        if ai_summary:
+            md += f"### 总结\n{ai_summary}\n"
+        if parse_error:
+            md += f"\n> ⚠️ JSON 解析出错: {parse_error}\n> 原始响应片段: {content[:300]}\n"
 
-    db3 = get_db()
-    try:
-        with db3.cursor() as cur:
+        with db.cursor() as cur:
             cur.execute(
                 "UPDATE ai_review_jobs SET status='done', result_md=%s, dismissed_count=%s, kept_count=%s, finished_at=NOW() WHERE id=%s",
                 (md, len(dismissed_list), len(kept_list), job_id),
             )
-        db3.commit()
+        db.commit()
     finally:
-        db3.close()
+        db.close()
 
 
 @bp.route("/api/ai/suspicious/review", methods=["POST"])
 def ai_suspicious_review_start():
     model = request.args.get("model", "").strip() or config.OPENROUTER_MODEL
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("SELECT id FROM ai_review_jobs WHERE status='running' ORDER BY id DESC LIMIT 1")
-            running = cur.fetchone()
-            if running:
-                return jsonify({"status": "already_running", "job_id": running["id"]})
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("SELECT id FROM ai_review_jobs WHERE status='running' ORDER BY id DESC LIMIT 1")
+        running = cur.fetchone()
+        if running:
+            return jsonify({"status": "already_running", "job_id": running["id"]})
 
-            cur.execute("""
-                SELECT sd.host, sd.severity, sd.reason, sd.detection_type,
-                       sd.request_count, sd.device_count,
-                       iac.asn, iac.org, iac.country
-                FROM suspicious_domains sd
-                LEFT JOIN ip_asn_cache iac
-                    ON iac.ip = REGEXP_SUBSTR(sd.host, '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+')
-                WHERE sd.dismissed = 0
-                ORDER BY FIELD(sd.severity,'high','medium','low'),
-                         sd.request_count DESC
-                LIMIT 150
-            """)
-            rows = cur.fetchall()
-            if not rows:
-                return jsonify({"status": "no_entries"})
+        cur.execute("""
+            SELECT sd.host, sd.severity, sd.reason, sd.detection_type,
+                   sd.request_count, sd.device_count,
+                   iac.asn, iac.org, iac.country
+            FROM suspicious_domains sd
+            LEFT JOIN ip_asn_cache iac
+                ON iac.ip = REGEXP_SUBSTR(sd.host, '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+')
+            WHERE sd.dismissed = 0
+            ORDER BY FIELD(sd.severity,'high','medium','low'),
+                     sd.request_count DESC
+            LIMIT 150
+        """)
+        rows = cur.fetchall()
+        if not rows:
+            return jsonify({"status": "no_entries"})
 
-            cur.execute(
-                "INSERT INTO ai_review_jobs (status, model, entry_count) VALUES ('running', %s, %s)",
-                (model, len(rows)),
-            )
-            job_id = cur.lastrowid
-        db.commit()
-    finally:
-        db.close()
+        cur.execute(
+            "INSERT INTO ai_review_jobs (status, model, entry_count) VALUES ('running', %s, %s)",
+            (model, len(rows)),
+        )
+        job_id = cur.lastrowid
+    db.commit()
 
     thread = threading.Thread(target=_run_ai_review_job, args=(job_id, rows, model), daemon=True)
     thread.start()
@@ -272,18 +258,15 @@ def ai_suspicious_review_start():
 
 @bp.route("/api/ai/suspicious/review/status")
 def ai_suspicious_review_status():
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT id, status, model, entry_count, dismissed_count, kept_count,
-                       error_msg, started_at, finished_at
-                FROM ai_review_jobs
-                ORDER BY id DESC LIMIT 1
-            """)
-            row = cur.fetchone()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT id, status, model, entry_count, dismissed_count, kept_count,
+                   error_msg, started_at, finished_at
+            FROM ai_review_jobs
+            ORDER BY id DESC LIMIT 1
+        """)
+        row = cur.fetchone()
 
     if not row:
         return jsonify({"status": "idle"})
@@ -303,16 +286,13 @@ def ai_suspicious_review_status():
 
 @bp.route("/api/ai/suspicious/review/result/<int:job_id>")
 def ai_suspicious_review_result(job_id):
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute(
-                "SELECT result_md, status, dismissed_count, kept_count FROM ai_review_jobs WHERE id=%s",
-                (job_id,),
-            )
-            row = cur.fetchone()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT result_md, status, dismissed_count, kept_count FROM ai_review_jobs WHERE id=%s",
+            (job_id,),
+        )
+        row = cur.fetchone()
 
     if not row:
         return jsonify({"error": "not found"}), 404
@@ -332,54 +312,51 @@ def ai_overview():
     end = range_info["end"]
     start_dt = range_info["start_dt"]
     end_dt = range_info["end_dt"]
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    COALESCE(SUM(in_bytes + out_bytes), 0) AS total_bytes,
-                    COALESCE(SUM(CASE WHEN policy_name != 'DIRECT' AND policy_name IS NOT NULL
-                                     THEN in_bytes + out_bytes ELSE 0 END), 0) AS proxy_bytes,
-                    COUNT(*) AS requests,
-                    COUNT(DISTINCT mac_address) AS devices
-                FROM requests
-                WHERE start_date >= %s AND start_date < %s
-            """, (start_dt, end_dt))
-            summary = cur.fetchone()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT
+                COALESCE(SUM(in_bytes + out_bytes), 0) AS total_bytes,
+                COALESCE(SUM(CASE WHEN policy_name != 'DIRECT' AND policy_name IS NOT NULL
+                                 THEN in_bytes + out_bytes ELSE 0 END), 0) AS proxy_bytes,
+                COUNT(*) AS requests,
+                COUNT(DISTINCT mac_address) AS devices
+            FROM requests
+            WHERE start_date >= %s AND start_date < %s
+        """, (start_dt, end_dt))
+        summary = cur.fetchone()
 
-            cur.execute("""
-                SELECT
-                    remote_host AS host,
-                    SUM(in_bytes + out_bytes) AS total_bytes,
-                    COUNT(*) AS requests,
-                    COUNT(DISTINCT mac_address) AS devices,
-                    MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL
-                             THEN 'DIRECT' ELSE 'PROXY' END) AS policy
-                FROM requests
-                WHERE start_date >= %s AND start_date < %s
-                  AND remote_host IS NOT NULL AND remote_host != ''
-                GROUP BY remote_host
-                ORDER BY total_bytes DESC
-                LIMIT 40
-            """, (start_dt, end_dt))
-            top_domains = cur.fetchall()
+        cur.execute("""
+            SELECT
+                remote_host AS host,
+                SUM(in_bytes + out_bytes) AS total_bytes,
+                COUNT(*) AS requests,
+                COUNT(DISTINCT mac_address) AS devices,
+                MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL
+                         THEN 'DIRECT' ELSE 'PROXY' END) AS policy
+            FROM requests
+            WHERE start_date >= %s AND start_date < %s
+              AND remote_host IS NOT NULL AND remote_host != ''
+            GROUP BY remote_host
+            ORDER BY total_bytes DESC
+            LIMIT 40
+        """, (start_dt, end_dt))
+        top_domains = cur.fetchall()
 
-            cur.execute("""
-                SELECT
-                    COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
-                    r.mac_address,
-                    SUM(r.in_bytes + r.out_bytes) AS total_bytes,
-                    COUNT(*) AS requests
-                FROM requests r
-                LEFT JOIN devices d ON r.mac_address = d.mac_address
-                WHERE r.start_date >= %s AND r.start_date < %s
-                GROUP BY r.mac_address
-                ORDER BY total_bytes DESC
-                LIMIT 15
-            """, (start_dt, end_dt))
-            top_devices = cur.fetchall()
-    finally:
-        db.close()
+        cur.execute("""
+            SELECT
+                COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                r.mac_address,
+                SUM(r.in_bytes + r.out_bytes) AS total_bytes,
+                COUNT(*) AS requests
+            FROM requests r
+            LEFT JOIN devices d ON r.mac_address = d.mac_address
+            WHERE r.start_date >= %s AND r.start_date < %s
+            GROUP BY r.mac_address
+            ORDER BY total_bytes DESC
+            LIMIT 15
+        """, (start_dt, end_dt))
+        top_devices = cur.fetchall()
 
     domain_lines = "\n".join(
         f"- {d['host']}  流量:{fmt_bytes(d['total_bytes'])}  请求:{d['requests']}  设备:{d['devices']}台  策略:{d['policy']}"
@@ -431,55 +408,52 @@ def ai_overview_hour():
     start_dt = time_window["start_dt"]
     end_dt = time_window["end_dt"]
     sort = request.args.get("sort", "upload")
+    sort_by_upload = sort == "upload"
 
     time_label = f"{date_str} 全天" if full_day else f"{date_str}  {hour:02d}:00 — {hour + 1:02d}:00"
-    sort_col = "out_bytes" if sort == "upload" else "in_bytes"
-    sort_label = "上传" if sort == "upload" else "下载"
+    sort_label = "上传" if sort_by_upload else "下载"
 
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute(f"""
-                SELECT remote_host AS host,
-                       COALESCE(SUM(out_bytes),0) AS upload_bytes,
-                       COALESCE(SUM(in_bytes),0)  AS download_bytes,
-                       COUNT(*) AS requests,
-                       MAX(CASE WHEN policy_name='DIRECT' OR policy_name IS NULL
-                                THEN 'DIRECT' ELSE 'PROXY' END) AS policy
-                FROM requests
-                WHERE start_date >= %s AND start_date < %s
-                  AND remote_host IS NOT NULL AND remote_host != ''
-                GROUP BY remote_host
-                ORDER BY SUM({sort_col}) DESC
-                LIMIT 20
-            """, (start_dt, end_dt))
-            top_domains = cur.fetchall()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT remote_host AS host,
+                   COALESCE(SUM(out_bytes),0) AS upload_bytes,
+                   COALESCE(SUM(in_bytes),0)  AS download_bytes,
+                   COUNT(*) AS requests,
+                   MAX(CASE WHEN policy_name='DIRECT' OR policy_name IS NULL
+                            THEN 'DIRECT' ELSE 'PROXY' END) AS policy
+            FROM requests
+            WHERE start_date >= %s AND start_date < %s
+              AND remote_host IS NOT NULL AND remote_host != ''
+            GROUP BY remote_host
+            ORDER BY IF(%s, SUM(out_bytes), SUM(in_bytes)) DESC
+            LIMIT 20
+        """, (start_dt, end_dt, sort_by_upload))
+        top_domains = cur.fetchall()
 
-            cur.execute(f"""
-                SELECT COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
-                       COALESCE(SUM(r.out_bytes),0) AS upload_bytes,
-                       COALESCE(SUM(r.in_bytes),0)  AS download_bytes,
-                       COUNT(*) AS requests
-                FROM requests r
-                LEFT JOIN devices d ON r.mac_address = d.mac_address
-                WHERE r.start_date >= %s AND r.start_date < %s
-                GROUP BY r.mac_address
-                ORDER BY SUM(r.{sort_col}) DESC
-                LIMIT 10
-            """, (start_dt, end_dt))
-            top_devices = cur.fetchall()
+        cur.execute("""
+            SELECT COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                   COALESCE(SUM(r.out_bytes),0) AS upload_bytes,
+                   COALESCE(SUM(r.in_bytes),0)  AS download_bytes,
+                   COUNT(*) AS requests
+            FROM requests r
+            LEFT JOIN devices d ON r.mac_address = d.mac_address
+            WHERE r.start_date >= %s AND r.start_date < %s
+            GROUP BY r.mac_address
+            ORDER BY IF(%s, SUM(r.out_bytes), SUM(r.in_bytes)) DESC
+            LIMIT 10
+        """, (start_dt, end_dt, sort_by_upload))
+        top_devices = cur.fetchall()
 
-            cur.execute("""
-                SELECT COALESCE(SUM(out_bytes),0) AS upload_total,
-                       COALESCE(SUM(in_bytes),0)  AS download_total,
-                       COUNT(*) AS requests,
-                       COUNT(DISTINCT mac_address) AS devices
-                FROM requests
-                WHERE start_date >= %s AND start_date < %s
-            """, (start_dt, end_dt))
-            summary = cur.fetchone()
-    finally:
-        db.close()
+        cur.execute("""
+            SELECT COALESCE(SUM(out_bytes),0) AS upload_total,
+                   COALESCE(SUM(in_bytes),0)  AS download_total,
+                   COUNT(*) AS requests,
+                   COUNT(DISTINCT mac_address) AS devices
+            FROM requests
+            WHERE start_date >= %s AND start_date < %s
+        """, (start_dt, end_dt))
+        summary = cur.fetchone()
 
     domain_lines = "\n".join(
         f"- {d['host']}  上传:{fmt_bytes(int(d['upload_bytes']))}  下载:{fmt_bytes(int(d['download_bytes']))}  请求:{d['requests']}  策略:{d['policy']}"

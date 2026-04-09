@@ -20,7 +20,7 @@ import requests
 sys.path.insert(0, os.path.dirname(__file__))
 import config
 from db import get_db
-from detector import check_new_domains_heuristic, check_domains_blocklist, update_suspicious_stats
+from detector import check_new_domains_heuristic, check_domains_blocklist, update_suspicious_stats, _fetch_new_domains
 
 logging.basicConfig(
     level=logging.INFO,
@@ -355,11 +355,11 @@ def main():
             sync_sqlite_daily(db)
             set_state(db, last_sqlite_sync_key, int(time.time()))
 
-        # Task 4: Heuristic suspicious domain check (every cycle)
-        check_new_domains_heuristic(db)
-
-        # Task 5: Local blocklist check (every cycle, same 60s window)
-        check_domains_blocklist(db)
+        # Task 4 & 5: Suspicious domain checks (shared query, every cycle)
+        new_domain_rows = _fetch_new_domains(db)
+        if new_domain_rows is not None:
+            check_new_domains_heuristic(db, prefetched_rows=new_domain_rows)
+            check_domains_blocklist(db, prefetched_rows=new_domain_rows)
 
         # Task 6: Update suspicious domain stats (once per day)
         last_stats_update = get_state(db, "last_suspicious_stats_update") or ""

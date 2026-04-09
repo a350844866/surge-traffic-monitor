@@ -1,8 +1,7 @@
 from flask import Blueprint, jsonify, request
 
 import config
-from db import get_db
-from web_common import build_time_window, get_rule_map, parse_range
+from web_common import build_time_window, get_request_db, get_rule_map, parse_range
 import requests as http_requests
 
 bp = Blueprint("traffic", __name__)
@@ -16,76 +15,73 @@ def api_overview():
     start_dt = range_info["start_dt"]
     end_dt = range_info["end_dt"]
     multi_day = start != end
-    db = get_db()
-    try:
-        with db.cursor() as cur:
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT
+                COALESCE(SUM(in_bytes + out_bytes), 0) AS total_bytes,
+                COALESCE(SUM(CASE WHEN policy_name != 'DIRECT' AND policy_name IS NOT NULL THEN in_bytes + out_bytes ELSE 0 END), 0) AS proxy_bytes,
+                COALESCE(SUM(CASE WHEN policy_name = 'DIRECT' THEN in_bytes + out_bytes ELSE 0 END), 0) AS direct_bytes,
+                COUNT(*) AS total_requests,
+                COUNT(DISTINCT mac_address) AS active_devices
+            FROM requests
+            WHERE start_date >= %s AND start_date < %s
+        """, (start_dt, end_dt))
+        summary = cur.fetchone()
+
+        if multi_day:
             cur.execute("""
                 SELECT
-                    COALESCE(SUM(in_bytes + out_bytes), 0) AS total_bytes,
-                    COALESCE(SUM(CASE WHEN policy_name != 'DIRECT' AND policy_name IS NOT NULL THEN in_bytes + out_bytes ELSE 0 END), 0) AS proxy_bytes,
-                    COALESCE(SUM(CASE WHEN policy_name = 'DIRECT' THEN in_bytes + out_bytes ELSE 0 END), 0) AS direct_bytes,
-                    COUNT(*) AS total_requests,
-                    COUNT(DISTINCT mac_address) AS active_devices
+                    DATE(start_date) AS label,
+                    COALESCE(SUM(in_bytes), 0) AS download,
+                    COALESCE(SUM(out_bytes), 0) AS upload
                 FROM requests
                 WHERE start_date >= %s AND start_date < %s
+                GROUP BY DATE(start_date)
+                ORDER BY label
             """, (start_dt, end_dt))
-            summary = cur.fetchone()
-
-            if multi_day:
-                cur.execute("""
-                    SELECT
-                        DATE(start_date) AS label,
-                        COALESCE(SUM(in_bytes), 0) AS download,
-                        COALESCE(SUM(out_bytes), 0) AS upload
-                    FROM requests
-                    WHERE start_date >= %s AND start_date < %s
-                    GROUP BY DATE(start_date)
-                    ORDER BY label
-                """, (start_dt, end_dt))
-            else:
-                cur.execute("""
-                    SELECT
-                        HOUR(start_date) AS label,
-                        COALESCE(SUM(in_bytes), 0) AS download,
-                        COALESCE(SUM(out_bytes), 0) AS upload
-                    FROM requests
-                    WHERE start_date >= %s AND start_date < %s
-                    GROUP BY HOUR(start_date)
-                    ORDER BY label
-                """, (start_dt, end_dt))
-            trend_rows = cur.fetchall()
-
+        else:
             cur.execute("""
                 SELECT
-                    COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
-                    r.mac_address,
-                    SUM(r.in_bytes + r.out_bytes) AS total_bytes,
-                    COUNT(*) AS requests
-                FROM requests r
-                LEFT JOIN devices d ON r.mac_address = d.mac_address
-                WHERE r.start_date >= %s AND r.start_date < %s
-                GROUP BY r.mac_address
-                ORDER BY total_bytes DESC
-                LIMIT 10
-            """, (start_dt, end_dt))
-            top_devices = cur.fetchall()
-
-            cur.execute("""
-                SELECT
-                    remote_host AS host,
-                    SUM(in_bytes + out_bytes) AS total_bytes,
-                    COUNT(*) AS requests,
-                    MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL THEN 'DIRECT' ELSE 'PROXY' END) AS policy
+                    HOUR(start_date) AS label,
+                    COALESCE(SUM(in_bytes), 0) AS download,
+                    COALESCE(SUM(out_bytes), 0) AS upload
                 FROM requests
                 WHERE start_date >= %s AND start_date < %s
-                  AND remote_host IS NOT NULL AND remote_host != ''
-                GROUP BY remote_host
-                ORDER BY total_bytes DESC
-                LIMIT 15
+                GROUP BY HOUR(start_date)
+                ORDER BY label
             """, (start_dt, end_dt))
-            top_domains = cur.fetchall()
-    finally:
-        db.close()
+        trend_rows = cur.fetchall()
+
+        cur.execute("""
+            SELECT
+                COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                r.mac_address,
+                SUM(r.in_bytes + r.out_bytes) AS total_bytes,
+                COUNT(*) AS requests
+            FROM requests r
+            LEFT JOIN devices d ON r.mac_address = d.mac_address
+            WHERE r.start_date >= %s AND r.start_date < %s
+            GROUP BY r.mac_address
+            ORDER BY total_bytes DESC
+            LIMIT 10
+        """, (start_dt, end_dt))
+        top_devices = cur.fetchall()
+
+        cur.execute("""
+            SELECT
+                remote_host AS host,
+                SUM(in_bytes + out_bytes) AS total_bytes,
+                COUNT(*) AS requests,
+                MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL THEN 'DIRECT' ELSE 'PROXY' END) AS policy
+            FROM requests
+            WHERE start_date >= %s AND start_date < %s
+              AND remote_host IS NOT NULL AND remote_host != ''
+            GROUP BY remote_host
+            ORDER BY total_bytes DESC
+            LIMIT 15
+        """, (start_dt, end_dt))
+        top_domains = cur.fetchall()
 
     if multi_day:
         trend_labels = [str(r["label"]) for r in trend_rows]
@@ -118,43 +114,40 @@ def api_overview_hour():
     start_dt = time_window["start_dt"]
     end_dt = time_window["end_dt"]
 
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    remote_host AS host,
-                    COALESCE(SUM(out_bytes), 0) AS upload_bytes,
-                    COALESCE(SUM(in_bytes), 0) AS download_bytes,
-                    COUNT(*) AS requests,
-                    MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL
-                             THEN 'DIRECT' ELSE 'PROXY' END) AS policy
-                FROM requests
-                WHERE start_date >= %s AND start_date < %s
-                  AND remote_host IS NOT NULL AND remote_host != ''
-                GROUP BY remote_host
-                ORDER BY upload_bytes DESC
-                LIMIT 20
-            """, (start_dt, end_dt))
-            top_domains = cur.fetchall()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT
+                remote_host AS host,
+                COALESCE(SUM(out_bytes), 0) AS upload_bytes,
+                COALESCE(SUM(in_bytes), 0) AS download_bytes,
+                COUNT(*) AS requests,
+                MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL
+                         THEN 'DIRECT' ELSE 'PROXY' END) AS policy
+            FROM requests
+            WHERE start_date >= %s AND start_date < %s
+              AND remote_host IS NOT NULL AND remote_host != ''
+            GROUP BY remote_host
+            ORDER BY upload_bytes DESC
+            LIMIT 20
+        """, (start_dt, end_dt))
+        top_domains = cur.fetchall()
 
-            cur.execute("""
-                SELECT
-                    COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
-                    r.mac_address,
-                    COALESCE(SUM(r.out_bytes), 0) AS upload_bytes,
-                    COALESCE(SUM(r.in_bytes), 0) AS download_bytes,
-                    COUNT(*) AS requests
-                FROM requests r
-                LEFT JOIN devices d ON r.mac_address = d.mac_address
-                WHERE r.start_date >= %s AND r.start_date < %s
-                GROUP BY r.mac_address
-                ORDER BY upload_bytes DESC
-                LIMIT 10
-            """, (start_dt, end_dt))
-            top_devices = cur.fetchall()
-    finally:
-        db.close()
+        cur.execute("""
+            SELECT
+                COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                r.mac_address,
+                COALESCE(SUM(r.out_bytes), 0) AS upload_bytes,
+                COALESCE(SUM(r.in_bytes), 0) AS download_bytes,
+                COUNT(*) AS requests
+            FROM requests r
+            LEFT JOIN devices d ON r.mac_address = d.mac_address
+            WHERE r.start_date >= %s AND r.start_date < %s
+            GROUP BY r.mac_address
+            ORDER BY upload_bytes DESC
+            LIMIT 10
+        """, (start_dt, end_dt))
+        top_devices = cur.fetchall()
 
     return jsonify({
         "date": date_str,
@@ -190,17 +183,14 @@ def api_device_rename(mac):
     except Exception as exc:
         return jsonify({"error": f"Surge unreachable: {exc}"}), 502
 
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute(
-                "INSERT INTO devices (mac_address, name) VALUES (%s, %s) "
-                "ON DUPLICATE KEY UPDATE name=%s",
-                (mac, name, name),
-            )
-        db.commit()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO devices (mac_address, name) VALUES (%s, %s) "
+            "ON DUPLICATE KEY UPDATE name=%s",
+            (mac, name, name),
+        )
+    db.commit()
 
     return jsonify({"ok": True, "name": name})
 
@@ -210,70 +200,67 @@ def api_device(mac):
     range_info = parse_range()
     start_dt = range_info["start_dt"]
     end_dt = range_info["end_dt"]
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("SELECT * FROM devices WHERE mac_address = %s", (mac,))
-            device = cur.fetchone()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("SELECT * FROM devices WHERE mac_address = %s", (mac,))
+        device = cur.fetchone()
 
-            cur.execute("""
+        cur.execute("""
+            SELECT
+                SUM(in_bytes + out_bytes) AS total_bytes,
+                SUM(CASE WHEN policy_name != 'DIRECT' AND policy_name IS NOT NULL THEN in_bytes + out_bytes ELSE 0 END) AS proxy_bytes,
+                SUM(CASE WHEN policy_name = 'DIRECT' THEN in_bytes + out_bytes ELSE 0 END) AS direct_bytes,
+                COUNT(*) AS requests
+            FROM requests
+            WHERE mac_address = %s AND start_date >= %s AND start_date < %s
+        """, (mac, start_dt, end_dt))
+        summary = cur.fetchone()
+
+        cur.execute("""
+            SELECT
+                remote_host AS host,
+                SUM(in_bytes + out_bytes) AS total_bytes,
+                COUNT(*) AS requests,
+                MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL THEN 'DIRECT' ELSE 'PROXY' END) AS policy
+            FROM requests
+            WHERE mac_address = %s AND start_date >= %s AND start_date < %s
+              AND remote_host IS NOT NULL AND remote_host != ''
+            GROUP BY remote_host
+            ORDER BY total_bytes DESC
+            LIMIT 20
+        """, (mac, start_dt, end_dt))
+        top_domains = cur.fetchall()
+
+        cur.execute("""
+            SELECT rule, policy_type,
+                SUM(total_bytes) AS total_bytes,
+                SUM(reqs)        AS requests
+            FROM (
                 SELECT
-                    SUM(in_bytes + out_bytes) AS total_bytes,
-                    SUM(CASE WHEN policy_name != 'DIRECT' AND policy_name IS NOT NULL THEN in_bytes + out_bytes ELSE 0 END) AS proxy_bytes,
-                    SUM(CASE WHEN policy_name = 'DIRECT' THEN in_bytes + out_bytes ELSE 0 END) AS direct_bytes,
-                    COUNT(*) AS requests
+                    rule,
+                    CASE WHEN policy_name IS NULL OR policy_name = 'DIRECT' THEN 'DIRECT'
+                         WHEN policy_name IN ('REJECT', 'REJECT-DROP') THEN 'REJECT'
+                         ELSE 'PROXY' END AS policy_type,
+                    in_bytes + out_bytes AS total_bytes,
+                    1 AS reqs
                 FROM requests
                 WHERE mac_address = %s AND start_date >= %s AND start_date < %s
-            """, (mac, start_dt, end_dt))
-            summary = cur.fetchone()
+            ) t
+            GROUP BY rule, policy_type
+        """, (mac, start_dt, end_dt))
+        policy_rows = cur.fetchall()
 
-            cur.execute("""
-                SELECT
-                    remote_host AS host,
-                    SUM(in_bytes + out_bytes) AS total_bytes,
-                    COUNT(*) AS requests,
-                    MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL THEN 'DIRECT' ELSE 'PROXY' END) AS policy
-                FROM requests
-                WHERE mac_address = %s AND start_date >= %s AND start_date < %s
-                  AND remote_host IS NOT NULL AND remote_host != ''
-                GROUP BY remote_host
-                ORDER BY total_bytes DESC
-                LIMIT 20
-            """, (mac, start_dt, end_dt))
-            top_domains = cur.fetchall()
-
-            cur.execute("""
-                SELECT rule, policy_type,
-                    SUM(total_bytes) AS total_bytes,
-                    SUM(reqs)        AS requests
-                FROM (
-                    SELECT
-                        rule,
-                        CASE WHEN policy_name IS NULL OR policy_name = 'DIRECT' THEN 'DIRECT'
-                             WHEN policy_name IN ('REJECT', 'REJECT-DROP') THEN 'REJECT'
-                             ELSE 'PROXY' END AS policy_type,
-                        in_bytes + out_bytes AS total_bytes,
-                        1 AS reqs
-                    FROM requests
-                    WHERE mac_address = %s AND start_date >= %s AND start_date < %s
-                ) t
-                GROUP BY rule, policy_type
-            """, (mac, start_dt, end_dt))
-            policy_rows = cur.fetchall()
-
-            cur.execute("""
-                SELECT
-                    DATE(start_date) AS day,
-                    SUM(in_bytes) AS download,
-                    SUM(out_bytes) AS upload
-                FROM requests
-                WHERE mac_address = %s AND start_date >= %s AND start_date < %s
-                GROUP BY DATE(start_date)
-                ORDER BY day
-            """, (mac, start_dt, end_dt))
-            trend = cur.fetchall()
-    finally:
-        db.close()
+        cur.execute("""
+            SELECT
+                DATE(start_date) AS day,
+                SUM(in_bytes) AS download,
+                SUM(out_bytes) AS upload
+            FROM requests
+            WHERE mac_address = %s AND start_date >= %s AND start_date < %s
+            GROUP BY DATE(start_date)
+            ORDER BY day
+        """, (mac, start_dt, end_dt))
+        trend = cur.fetchall()
 
     rule_map = get_rule_map()
     group_agg = {}
@@ -306,27 +293,24 @@ def api_domains():
     range_info = parse_range()
     start_dt = range_info["start_dt"]
     end_dt = range_info["end_dt"]
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    COALESCE(remote_host, 'unknown') AS host,
-                    SUM(in_bytes + out_bytes) AS total_bytes,
-                    SUM(in_bytes) AS download,
-                    SUM(out_bytes) AS upload,
-                    COUNT(*) AS requests,
-                    COUNT(DISTINCT mac_address) AS devices,
-                    MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL THEN 'DIRECT' ELSE 'PROXY' END) AS policies
-                FROM requests
-                WHERE start_date >= %s AND start_date < %s
-                GROUP BY remote_host
-                ORDER BY total_bytes DESC
-                LIMIT 100
-            """, (start_dt, end_dt))
-            domains = cur.fetchall()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT
+                COALESCE(remote_host, 'unknown') AS host,
+                SUM(in_bytes + out_bytes) AS total_bytes,
+                SUM(in_bytes) AS download,
+                SUM(out_bytes) AS upload,
+                COUNT(*) AS requests,
+                COUNT(DISTINCT mac_address) AS devices,
+                MAX(CASE WHEN policy_name = 'DIRECT' OR policy_name IS NULL THEN 'DIRECT' ELSE 'PROXY' END) AS policies
+            FROM requests
+            WHERE start_date >= %s AND start_date < %s
+            GROUP BY remote_host
+            ORDER BY total_bytes DESC
+            LIMIT 100
+        """, (start_dt, end_dt))
+        domains = cur.fetchall()
 
     return jsonify([
         {**r, "total_bytes": int(r["total_bytes"]), "download": int(r["download"]), "upload": int(r["upload"]), "requests": int(r["requests"]), "devices": int(r["devices"])}
@@ -339,41 +323,38 @@ def api_policies():
     range_info = parse_range()
     start_dt = range_info["start_dt"]
     end_dt = range_info["end_dt"]
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    COALESCE(policy_name, 'DIRECT') AS policy,
-                    SUM(in_bytes + out_bytes) AS total_bytes,
-                    SUM(in_bytes) AS download,
-                    SUM(out_bytes) AS upload,
-                    COUNT(*) AS requests,
-                    COUNT(DISTINCT mac_address) AS devices
-                FROM requests
-                WHERE start_date >= %s AND start_date < %s
-                GROUP BY policy_name
-                ORDER BY total_bytes DESC
-            """, (start_dt, end_dt))
-            policies = cur.fetchall()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT
+                COALESCE(policy_name, 'DIRECT') AS policy,
+                SUM(in_bytes + out_bytes) AS total_bytes,
+                SUM(in_bytes) AS download,
+                SUM(out_bytes) AS upload,
+                COUNT(*) AS requests,
+                COUNT(DISTINCT mac_address) AS devices
+            FROM requests
+            WHERE start_date >= %s AND start_date < %s
+            GROUP BY policy_name
+            ORDER BY total_bytes DESC
+        """, (start_dt, end_dt))
+        policies = cur.fetchall()
 
-            cur.execute("""
-                SELECT
-                    COALESCE(r.policy_name, 'DIRECT') AS policy,
-                    COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
-                    r.mac_address,
-                    SUM(r.in_bytes + r.out_bytes) AS total_bytes
-                FROM requests r
-                LEFT JOIN devices d ON r.mac_address = d.mac_address
-                WHERE r.start_date >= %s AND r.start_date < %s
-                  AND r.policy_name != 'DIRECT' AND r.policy_name IS NOT NULL
-                GROUP BY r.policy_name, r.mac_address
-                ORDER BY total_bytes DESC
-                LIMIT 50
-            """, (start_dt, end_dt))
-            policy_devices = cur.fetchall()
-    finally:
-        db.close()
+        cur.execute("""
+            SELECT
+                COALESCE(r.policy_name, 'DIRECT') AS policy,
+                COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                r.mac_address,
+                SUM(r.in_bytes + r.out_bytes) AS total_bytes
+            FROM requests r
+            LEFT JOIN devices d ON r.mac_address = d.mac_address
+            WHERE r.start_date >= %s AND r.start_date < %s
+              AND r.policy_name != 'DIRECT' AND r.policy_name IS NOT NULL
+            GROUP BY r.policy_name, r.mac_address
+            ORDER BY total_bytes DESC
+            LIMIT 50
+        """, (start_dt, end_dt))
+        policy_devices = cur.fetchall()
 
     return jsonify({
         "policies": [
@@ -389,39 +370,36 @@ def api_domain(host):
     range_info = parse_range()
     start_dt = range_info["start_dt"]
     end_dt = range_info["end_dt"]
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
-                    r.mac_address,
-                    SUM(r.in_bytes + r.out_bytes) AS total_bytes,
-                    SUM(r.in_bytes) AS download,
-                    SUM(r.out_bytes) AS upload,
-                    COUNT(*) AS requests,
-                    MAX(CASE WHEN r.policy_name = 'DIRECT' OR r.policy_name IS NULL THEN 'DIRECT' ELSE 'PROXY' END) AS policy
-                FROM requests r
-                LEFT JOIN devices d ON r.mac_address = d.mac_address
-                WHERE r.remote_host = %s AND r.start_date >= %s AND r.start_date < %s
-                GROUP BY r.mac_address
-                ORDER BY total_bytes DESC
-            """, (host, start_dt, end_dt))
-            devices = cur.fetchall()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT
+                COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                r.mac_address,
+                SUM(r.in_bytes + r.out_bytes) AS total_bytes,
+                SUM(r.in_bytes) AS download,
+                SUM(r.out_bytes) AS upload,
+                COUNT(*) AS requests,
+                MAX(CASE WHEN r.policy_name = 'DIRECT' OR r.policy_name IS NULL THEN 'DIRECT' ELSE 'PROXY' END) AS policy
+            FROM requests r
+            LEFT JOIN devices d ON r.mac_address = d.mac_address
+            WHERE r.remote_host = %s AND r.start_date >= %s AND r.start_date < %s
+            GROUP BY r.mac_address
+            ORDER BY total_bytes DESC
+        """, (host, start_dt, end_dt))
+        devices = cur.fetchall()
 
-            cur.execute("""
-                SELECT
-                    SUM(in_bytes + out_bytes) AS total_bytes,
-                    SUM(in_bytes) AS download,
-                    SUM(out_bytes) AS upload,
-                    COUNT(*) AS requests,
-                    COUNT(DISTINCT mac_address) AS device_count
-                FROM requests
-                WHERE remote_host = %s AND start_date >= %s AND start_date < %s
-            """, (host, start_dt, end_dt))
-            summary = cur.fetchone()
-    finally:
-        db.close()
+        cur.execute("""
+            SELECT
+                SUM(in_bytes + out_bytes) AS total_bytes,
+                SUM(in_bytes) AS download,
+                SUM(out_bytes) AS upload,
+                COUNT(*) AS requests,
+                COUNT(DISTINCT mac_address) AS device_count
+            FROM requests
+            WHERE remote_host = %s AND start_date >= %s AND start_date < %s
+        """, (host, start_dt, end_dt))
+        summary = cur.fetchone()
 
     return jsonify({
         "host": host,
@@ -439,36 +417,32 @@ def api_policy_groups():
     start_dt = range_info["start_dt"]
     end_dt = range_info["end_dt"]
     rule_map = get_rule_map()
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT rule, policy_type,
-                    SUM(total_bytes) AS total_bytes,
-                    SUM(download)    AS download,
-                    SUM(upload)      AS upload,
-                    SUM(requests)    AS requests,
-                    SUM(devices)     AS devices
-                FROM (
-                    SELECT
-                        rule,
-                        CASE WHEN policy_name IS NULL OR policy_name = 'DIRECT' THEN 'DIRECT'
-                             WHEN policy_name IN ('REJECT', 'REJECT-DROP') THEN 'REJECT'
-                             ELSE 'PROXY' END AS policy_type,
-                        in_bytes + out_bytes AS total_bytes,
-                        in_bytes             AS download,
-                        out_bytes            AS upload,
-                        1                    AS requests,
-                        1                    AS devices
-                    FROM requests
-                    WHERE start_date >= %s AND start_date < %s
-                ) t
-                GROUP BY rule, policy_type
-                ORDER BY total_bytes DESC
-            """, (start_dt, end_dt))
-            rows = cur.fetchall()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT rule, policy_type,
+                SUM(total_bytes) AS total_bytes,
+                SUM(download)    AS download,
+                SUM(upload)      AS upload,
+                COUNT(*)         AS requests,
+                COUNT(DISTINCT mac_address) AS devices
+            FROM (
+                SELECT
+                    rule,
+                    mac_address,
+                    CASE WHEN policy_name IS NULL OR policy_name = 'DIRECT' THEN 'DIRECT'
+                         WHEN policy_name IN ('REJECT', 'REJECT-DROP') THEN 'REJECT'
+                         ELSE 'PROXY' END AS policy_type,
+                    in_bytes + out_bytes AS total_bytes,
+                    in_bytes             AS download,
+                    out_bytes            AS upload
+                FROM requests
+                WHERE start_date >= %s AND start_date < %s
+            ) t
+            GROUP BY rule, policy_type
+            ORDER BY total_bytes DESC
+        """, (start_dt, end_dt))
+        rows = cur.fetchall()
 
     group_agg = {}
     for row in rows:
@@ -487,20 +461,20 @@ def api_policy_groups():
                 "download": 0,
                 "upload": 0,
                 "requests": 0,
-                "devices": set(),
+                "devices": 0,
             }
         group_agg[group]["total_bytes"] += int(row["total_bytes"])
         group_agg[group]["download"] += int(row["download"])
         group_agg[group]["upload"] += int(row["upload"])
         group_agg[group]["requests"] += int(row["requests"])
-        group_agg[group]["devices"].add(row["devices"])
+        group_agg[group]["devices"] += int(row["devices"])
 
     result = sorted(
-        [{**{k: v for k, v in item.items() if k != "devices"}, "devices": len(item["devices"])} for item in group_agg.values()],
+        group_agg.values(),
         key=lambda item: item["total_bytes"],
         reverse=True,
     )
-    return jsonify(result)
+    return jsonify(list(result))
 
 
 @bp.route("/api/policy_group/<path:name>")
@@ -517,148 +491,145 @@ def api_policy_group_detail(name):
     if name not in {"🎯 直连流量", "🛑 拦截/拒绝"} and not rules:
         return jsonify({"policy_group": name, "domains": [], "devices": []})
 
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            if name == "🎯 直连流量":
-                cur.execute("""
-                    SELECT
-                        r.remote_host AS host,
-                        SUM(r.in_bytes + r.out_bytes) AS total_bytes,
-                        SUM(r.in_bytes) AS download,
-                        SUM(r.out_bytes) AS upload,
-                        COUNT(*) AS requests
-                    FROM requests r
-                    WHERE r.start_date >= %s AND r.start_date < %s
-                      AND (r.policy_name IS NULL OR r.policy_name = 'DIRECT')
-                      AND r.remote_host IS NOT NULL AND r.remote_host != ''
-                    GROUP BY r.remote_host
-                    ORDER BY total_bytes DESC
-                    LIMIT 50
-                """, (start_dt, end_dt))
-                domains = cur.fetchall()
+    db = get_request_db()
+    with db.cursor() as cur:
+        if name == "🎯 直连流量":
+            cur.execute("""
+                SELECT
+                    r.remote_host AS host,
+                    SUM(r.in_bytes + r.out_bytes) AS total_bytes,
+                    SUM(r.in_bytes) AS download,
+                    SUM(r.out_bytes) AS upload,
+                    COUNT(*) AS requests
+                FROM requests r
+                WHERE r.start_date >= %s AND r.start_date < %s
+                  AND (r.policy_name IS NULL OR r.policy_name = 'DIRECT')
+                  AND r.remote_host IS NOT NULL AND r.remote_host != ''
+                GROUP BY r.remote_host
+                ORDER BY total_bytes DESC
+                LIMIT 50
+            """, (start_dt, end_dt))
+            domains = cur.fetchall()
 
-                cur.execute("""
-                    SELECT
-                        COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
-                        r.mac_address,
-                        SUM(r.in_bytes + r.out_bytes) AS total_bytes,
-                        COUNT(*) AS requests
-                    FROM requests r
-                    LEFT JOIN devices d ON r.mac_address = d.mac_address
-                    WHERE r.start_date >= %s AND r.start_date < %s
-                      AND (r.policy_name IS NULL OR r.policy_name = 'DIRECT')
-                    GROUP BY r.mac_address
-                    ORDER BY total_bytes DESC
-                """, (start_dt, end_dt))
-                devices = cur.fetchall()
+            cur.execute("""
+                SELECT
+                    COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                    r.mac_address,
+                    SUM(r.in_bytes + r.out_bytes) AS total_bytes,
+                    COUNT(*) AS requests
+                FROM requests r
+                LEFT JOIN devices d ON r.mac_address = d.mac_address
+                WHERE r.start_date >= %s AND r.start_date < %s
+                  AND (r.policy_name IS NULL OR r.policy_name = 'DIRECT')
+                GROUP BY r.mac_address
+                ORDER BY total_bytes DESC
+            """, (start_dt, end_dt))
+            devices = cur.fetchall()
 
-                cur.execute("""
-                    SELECT
-                        COALESCE(SUM(r.in_bytes + r.out_bytes), 0) AS total_bytes,
-                        COALESCE(SUM(r.in_bytes), 0) AS download,
-                        COALESCE(SUM(r.out_bytes), 0) AS upload,
-                        COUNT(*) AS requests
-                    FROM requests r
-                    WHERE r.start_date >= %s AND r.start_date < %s
-                      AND (r.policy_name IS NULL OR r.policy_name = 'DIRECT')
-                """, (start_dt, end_dt))
-                summary = cur.fetchone()
-            elif name == "🛑 拦截/拒绝":
-                cur.execute("""
-                    SELECT
-                        r.remote_host AS host,
-                        SUM(r.in_bytes + r.out_bytes) AS total_bytes,
-                        SUM(r.in_bytes) AS download,
-                        SUM(r.out_bytes) AS upload,
-                        COUNT(*) AS requests
-                    FROM requests r
-                    WHERE r.start_date >= %s AND r.start_date < %s
-                      AND r.policy_name IN ('REJECT', 'REJECT-DROP')
-                      AND r.remote_host IS NOT NULL AND r.remote_host != ''
-                    GROUP BY r.remote_host
-                    ORDER BY total_bytes DESC
-                    LIMIT 50
-                """, (start_dt, end_dt))
-                domains = cur.fetchall()
+            cur.execute("""
+                SELECT
+                    COALESCE(SUM(r.in_bytes + r.out_bytes), 0) AS total_bytes,
+                    COALESCE(SUM(r.in_bytes), 0) AS download,
+                    COALESCE(SUM(r.out_bytes), 0) AS upload,
+                    COUNT(*) AS requests
+                FROM requests r
+                WHERE r.start_date >= %s AND r.start_date < %s
+                  AND (r.policy_name IS NULL OR r.policy_name = 'DIRECT')
+            """, (start_dt, end_dt))
+            summary = cur.fetchone()
+        elif name == "🛑 拦截/拒绝":
+            cur.execute("""
+                SELECT
+                    r.remote_host AS host,
+                    SUM(r.in_bytes + r.out_bytes) AS total_bytes,
+                    SUM(r.in_bytes) AS download,
+                    SUM(r.out_bytes) AS upload,
+                    COUNT(*) AS requests
+                FROM requests r
+                WHERE r.start_date >= %s AND r.start_date < %s
+                  AND r.policy_name IN ('REJECT', 'REJECT-DROP')
+                  AND r.remote_host IS NOT NULL AND r.remote_host != ''
+                GROUP BY r.remote_host
+                ORDER BY total_bytes DESC
+                LIMIT 50
+            """, (start_dt, end_dt))
+            domains = cur.fetchall()
 
-                cur.execute("""
-                    SELECT
-                        COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
-                        r.mac_address,
-                        SUM(r.in_bytes + r.out_bytes) AS total_bytes,
-                        COUNT(*) AS requests
-                    FROM requests r
-                    LEFT JOIN devices d ON r.mac_address = d.mac_address
-                    WHERE r.start_date >= %s AND r.start_date < %s
-                      AND r.policy_name IN ('REJECT', 'REJECT-DROP')
-                    GROUP BY r.mac_address
-                    ORDER BY total_bytes DESC
-                """, (start_dt, end_dt))
-                devices = cur.fetchall()
+            cur.execute("""
+                SELECT
+                    COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                    r.mac_address,
+                    SUM(r.in_bytes + r.out_bytes) AS total_bytes,
+                    COUNT(*) AS requests
+                FROM requests r
+                LEFT JOIN devices d ON r.mac_address = d.mac_address
+                WHERE r.start_date >= %s AND r.start_date < %s
+                  AND r.policy_name IN ('REJECT', 'REJECT-DROP')
+                GROUP BY r.mac_address
+                ORDER BY total_bytes DESC
+            """, (start_dt, end_dt))
+            devices = cur.fetchall()
 
-                cur.execute("""
-                    SELECT
-                        COALESCE(SUM(r.in_bytes + r.out_bytes), 0) AS total_bytes,
-                        COALESCE(SUM(r.in_bytes), 0) AS download,
-                        COALESCE(SUM(r.out_bytes), 0) AS upload,
-                        COUNT(*) AS requests
-                    FROM requests r
-                    WHERE r.start_date >= %s AND r.start_date < %s
-                      AND r.policy_name IN ('REJECT', 'REJECT-DROP')
-                """, (start_dt, end_dt))
-                summary = cur.fetchone()
-            else:
-                placeholders = ",".join(["%s"] * len(rules))
-                params = (start_dt, end_dt, *rules)
-                cur.execute(f"""
-                    SELECT
-                        r.remote_host AS host,
-                        SUM(r.in_bytes + r.out_bytes) AS total_bytes,
-                        SUM(r.in_bytes) AS download,
-                        SUM(r.out_bytes) AS upload,
-                        COUNT(*) AS requests
-                    FROM requests r
-                    WHERE r.start_date >= %s AND r.start_date < %s
-                      AND r.rule IN ({placeholders})
-                      AND r.policy_name != 'DIRECT' AND r.policy_name IS NOT NULL
-                      AND r.remote_host IS NOT NULL AND r.remote_host != ''
-                    GROUP BY r.remote_host
-                    ORDER BY total_bytes DESC
-                    LIMIT 50
-                """, params)
-                domains = cur.fetchall()
+            cur.execute("""
+                SELECT
+                    COALESCE(SUM(r.in_bytes + r.out_bytes), 0) AS total_bytes,
+                    COALESCE(SUM(r.in_bytes), 0) AS download,
+                    COALESCE(SUM(r.out_bytes), 0) AS upload,
+                    COUNT(*) AS requests
+                FROM requests r
+                WHERE r.start_date >= %s AND r.start_date < %s
+                  AND r.policy_name IN ('REJECT', 'REJECT-DROP')
+            """, (start_dt, end_dt))
+            summary = cur.fetchone()
+        else:
+            placeholders = ",".join(["%s"] * len(rules))
+            params = (start_dt, end_dt, *rules)
+            cur.execute(f"""
+                SELECT
+                    r.remote_host AS host,
+                    SUM(r.in_bytes + r.out_bytes) AS total_bytes,
+                    SUM(r.in_bytes) AS download,
+                    SUM(r.out_bytes) AS upload,
+                    COUNT(*) AS requests
+                FROM requests r
+                WHERE r.start_date >= %s AND r.start_date < %s
+                  AND r.rule IN ({placeholders})
+                  AND r.policy_name != 'DIRECT' AND r.policy_name IS NOT NULL
+                  AND r.remote_host IS NOT NULL AND r.remote_host != ''
+                GROUP BY r.remote_host
+                ORDER BY total_bytes DESC
+                LIMIT 50
+            """, params)
+            domains = cur.fetchall()
 
-                cur.execute(f"""
-                    SELECT
-                        COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
-                        r.mac_address,
-                        SUM(r.in_bytes + r.out_bytes) AS total_bytes,
-                        COUNT(*) AS requests
-                    FROM requests r
-                    LEFT JOIN devices d ON r.mac_address = d.mac_address
-                    WHERE r.start_date >= %s AND r.start_date < %s
-                      AND r.rule IN ({placeholders})
-                      AND r.policy_name != 'DIRECT' AND r.policy_name IS NOT NULL
-                    GROUP BY r.mac_address
-                    ORDER BY total_bytes DESC
-                """, params)
-                devices = cur.fetchall()
+            cur.execute(f"""
+                SELECT
+                    COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                    r.mac_address,
+                    SUM(r.in_bytes + r.out_bytes) AS total_bytes,
+                    COUNT(*) AS requests
+                FROM requests r
+                LEFT JOIN devices d ON r.mac_address = d.mac_address
+                WHERE r.start_date >= %s AND r.start_date < %s
+                  AND r.rule IN ({placeholders})
+                  AND r.policy_name != 'DIRECT' AND r.policy_name IS NOT NULL
+                GROUP BY r.mac_address
+                ORDER BY total_bytes DESC
+            """, params)
+            devices = cur.fetchall()
 
-                cur.execute(f"""
-                    SELECT
-                        COALESCE(SUM(r.in_bytes + r.out_bytes), 0) AS total_bytes,
-                        COALESCE(SUM(r.in_bytes), 0) AS download,
-                        COALESCE(SUM(r.out_bytes), 0) AS upload,
-                        COUNT(*) AS requests
-                    FROM requests r
-                    WHERE r.start_date >= %s AND r.start_date < %s
-                      AND r.rule IN ({placeholders})
-                      AND r.policy_name != 'DIRECT' AND r.policy_name IS NOT NULL
-                """, params)
-                summary = cur.fetchone()
-    finally:
-        db.close()
+            cur.execute(f"""
+                SELECT
+                    COALESCE(SUM(r.in_bytes + r.out_bytes), 0) AS total_bytes,
+                    COALESCE(SUM(r.in_bytes), 0) AS download,
+                    COALESCE(SUM(r.out_bytes), 0) AS upload,
+                    COUNT(*) AS requests
+                FROM requests r
+                WHERE r.start_date >= %s AND r.start_date < %s
+                  AND r.rule IN ({placeholders})
+                  AND r.policy_name != 'DIRECT' AND r.policy_name IS NOT NULL
+            """, params)
+            summary = cur.fetchone()
 
     return jsonify({
         "policy_group": name,
@@ -673,18 +644,15 @@ def api_policy_group_detail(name):
 
 @bp.route("/api/devices_list")
 def api_devices_list():
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT d.mac_address, d.name, d.vendor, d.current_ip,
-                       d.dhcp_hostname, d.dns_name
-                FROM devices d
-                ORDER BY COALESCE(d.name, d.dhcp_hostname, d.mac_address)
-            """)
-            devices = cur.fetchall()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT d.mac_address, d.name, d.vendor, d.current_ip,
+                   d.dhcp_hostname, d.dns_name
+            FROM devices d
+            ORDER BY COALESCE(d.name, d.dhcp_hostname, d.mac_address)
+        """)
+        devices = cur.fetchall()
     return jsonify(devices)
 
 
@@ -693,32 +661,29 @@ def api_devices():
     range_info = parse_range()
     start_dt = range_info["start_dt"]
     end_dt = range_info["end_dt"]
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
-                    r.mac_address,
-                    d.vendor,
-                    d.current_ip,
-                    SUM(r.in_bytes + r.out_bytes) AS total_bytes,
-                    SUM(r.in_bytes) AS download,
-                    SUM(r.out_bytes) AS upload,
-                    COUNT(*) AS requests,
-                    SUM(CASE WHEN r.policy_name != 'DIRECT' AND r.policy_name IS NOT NULL
-                             THEN r.in_bytes + r.out_bytes ELSE 0 END) AS proxy_bytes,
-                    SUM(CASE WHEN r.policy_name = 'DIRECT' OR r.policy_name IS NULL
-                             THEN r.in_bytes + r.out_bytes ELSE 0 END) AS direct_bytes
-                FROM requests r
-                LEFT JOIN devices d ON r.mac_address = d.mac_address
-                WHERE r.start_date >= %s AND r.start_date < %s
-                GROUP BY r.mac_address
-                ORDER BY total_bytes DESC
-            """, (start_dt, end_dt))
-            devices = cur.fetchall()
-    finally:
-        db.close()
+    db = get_request_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT
+                COALESCE(d.name, d.current_ip, MAX(r.source_address), r.mac_address) AS device_name,
+                r.mac_address,
+                d.vendor,
+                d.current_ip,
+                SUM(r.in_bytes + r.out_bytes) AS total_bytes,
+                SUM(r.in_bytes) AS download,
+                SUM(r.out_bytes) AS upload,
+                COUNT(*) AS requests,
+                SUM(CASE WHEN r.policy_name != 'DIRECT' AND r.policy_name IS NOT NULL
+                         THEN r.in_bytes + r.out_bytes ELSE 0 END) AS proxy_bytes,
+                SUM(CASE WHEN r.policy_name = 'DIRECT' OR r.policy_name IS NULL
+                         THEN r.in_bytes + r.out_bytes ELSE 0 END) AS direct_bytes
+            FROM requests r
+            LEFT JOIN devices d ON r.mac_address = d.mac_address
+            WHERE r.start_date >= %s AND r.start_date < %s
+            GROUP BY r.mac_address
+            ORDER BY total_bytes DESC
+        """, (start_dt, end_dt))
+        devices = cur.fetchall()
 
     return jsonify([
         {

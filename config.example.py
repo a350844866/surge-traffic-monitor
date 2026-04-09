@@ -83,6 +83,9 @@ REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = _get_int("REDIS_PORT", 6379)
 REDIS_DB = _get_int("REDIS_DB", 0)
 
+# Web dashboard
+API_KEY = os.getenv("API_KEY", "")  # Optional: set to require auth on sensitive API endpoints
+
 # Airport (subscription) management
 SUBCONVERTER_URL = os.getenv("SUBCONVERTER_URL", "http://127.0.0.1:25500")
 SUB_STORE_PATH = os.getenv("SUB_STORE_PATH", "/data/sub-store")

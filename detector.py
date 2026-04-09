@@ -331,10 +331,10 @@ def _check_heuristics(host):
     return None, None
 
 
-# ─── Heuristic detection (runs every collector cycle) ─────────────────────────
+# ─── Shared query for new domains ────────────────────────────────────────────
 
-def check_new_domains_heuristic(db):
-    """Check domains seen in the last 60s against heuristic rules."""
+def _fetch_new_domains(db):
+    """Fetch domains seen in the last 60s that are not yet in suspicious_domains."""
     try:
         with db.cursor() as cur:
             cur.execute("""
@@ -348,10 +348,22 @@ def check_new_domains_heuristic(db):
                   AND sd.host IS NULL
                 GROUP BY r.remote_host
             """)
-            rows = cur.fetchall()
+            return cur.fetchall()
     except Exception as e:
-        log.warning(f"heuristic query failed: {e}")
-        return 0
+        log.warning(f"new domains query failed: {e}")
+        return None
+
+
+# ─── Heuristic detection (runs every collector cycle) ─────────────────────────
+
+def check_new_domains_heuristic(db, prefetched_rows=None):
+    """Check domains seen in the last 60s against heuristic rules."""
+    if prefetched_rows is None:
+        rows = _fetch_new_domains(db)
+        if rows is None:
+            return 0
+    else:
+        rows = prefetched_rows
 
     flagged = 0
     for row in rows:
@@ -425,28 +437,17 @@ def check_new_domains_heuristic(db):
 
 # ─── Local blocklist detection (runs every collector cycle) ───────────────────
 
-def check_domains_blocklist(db):
+def check_domains_blocklist(db, prefetched_rows=None):
     """
     Check domains seen in the last 60s against the local domain_blocklist table.
     Fast SQL JOIN — no external calls.
     """
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                SELECT remote_host,
-                       COUNT(*) AS req_count,
-                       COUNT(DISTINCT mac_address) AS dev_count
-                FROM requests r
-                LEFT JOIN suspicious_domains sd ON sd.host = r.remote_host
-                WHERE r.start_date >= NOW() - INTERVAL 60 SECOND
-                  AND r.remote_host IS NOT NULL
-                  AND sd.host IS NULL
-                GROUP BY r.remote_host
-            """)
-            rows = cur.fetchall()
-    except Exception as e:
-        log.warning(f"blocklist query failed: {e}")
-        return 0
+    if prefetched_rows is None:
+        rows = _fetch_new_domains(db)
+        if rows is None:
+            return 0
+    else:
+        rows = prefetched_rows
 
     if not rows:
         return 0
