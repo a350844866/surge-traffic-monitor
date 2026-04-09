@@ -58,7 +58,7 @@ def _check_basic_auth():
 @bp.route("/sub/<filename>")
 def serve_node_file(filename):
     """Serve node files. Requires basic auth when accessed externally (via NPM)."""
-    if not filename.endswith("_surge.txt"):
+    if not filename.endswith("_surge.txt") and filename != "_temp_raw.txt":
         abort(404)
     fpath = (SUB_STORE / filename).resolve()
     if not str(fpath).startswith(str(SUB_STORE.resolve())):
@@ -111,6 +111,10 @@ def _build_subconv_url(raw_url, extra=""):
     return base
 
 
+# Docker bridge gateway — subconverter (bridge) reaches surge-monitor (host) here
+_LOCAL_SUB_BASE = "http://172.17.0.1:8866/sub"
+
+
 def _fetch_nodes(subconv_url):
     resp = requests.get(subconv_url, timeout=30)
     resp.raise_for_status()
@@ -120,6 +124,22 @@ def _fetch_nodes(subconv_url):
     text = re.sub(r",sni=", ", sni=", text)
     lines = [l for l in text.splitlines() if l.strip() and " = " in l]
     return "\n".join(lines) + "\n"
+
+
+def _fetch_nodes_via_proxy(raw_url):
+    """Pre-download subscription ourselves (clean headers), then convert via subconverter.
+
+    Some providers block requests with SubConverter-Request headers.
+    We download the raw subscription first, save to a temp file,
+    and let subconverter fetch from our local server instead.
+    """
+    resp = requests.get(raw_url, timeout=30,
+                        headers={"User-Agent": "clash-verge/v2.2.3"})
+    resp.raise_for_status()
+    temp_path = SUB_STORE / "_temp_raw.txt"
+    temp_path.write_text(resp.text, "utf-8")
+    local_url = f"{_LOCAL_SUB_BASE}/_temp_raw.txt"
+    return _fetch_nodes(_build_subconv_url(local_url))
 
 
 def _write_pass_file():
@@ -412,17 +432,21 @@ def add_airport():
     if name in airports:
         return jsonify({"error": f"airport '{name}' already exists"}), 409
 
-    # 1. Fetch nodes
+    # 1. Fetch nodes (fallback to proxy if subconverter is blocked)
     subconv_url = _build_subconv_url(subscribe_url)
     try:
         node_text = _fetch_nodes(subconv_url)
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response is not None else 0
-        log.warning("Add %s subconverter HTTP %s: %s", name, status, e)
-        return jsonify({"error": f"订阅转换失败 (HTTP {status})，请检查订阅链接"}), 502
-    except Exception as e:
-        log.warning("Add %s fetch failed: %s", name, e)
-        return jsonify({"error": "订阅获取失败，请检查订阅链接是否有效"}), 502
+    except Exception:
+        log.info("Add %s: direct fetch failed, retrying via proxy download", name)
+        try:
+            node_text = _fetch_nodes_via_proxy(subscribe_url)
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            log.warning("Add %s proxy HTTP %s: %s", name, status, e)
+            return jsonify({"error": f"订阅转换失败 (HTTP {status})，请检查订阅链接"}), 502
+        except Exception as e:
+            log.warning("Add %s fetch failed: %s", name, e)
+            return jsonify({"error": "订阅获取失败，请检查订阅链接是否有效"}), 502
 
     node_count = len([l for l in node_text.splitlines() if l.strip()])
     if node_count == 0:
@@ -499,19 +523,25 @@ def refresh_airport(name):
     data = request.get_json(silent=True) or {}
     new_subscribe_url = data.get("subscribe_url", "").strip()
 
+    raw_url = new_subscribe_url or info.get("subscribe_url", "")
     if new_subscribe_url:
         url = _build_subconv_url(new_subscribe_url)
     else:
-        url = info.get("subconverter_url") or _build_subconv_url(info["subscribe_url"])
+        url = info.get("subconverter_url") or _build_subconv_url(raw_url)
     try:
         node_text = _fetch_nodes(url)
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response is not None else 0
-        log.warning("Refresh %s subconverter HTTP %s: %s", name, status, e)
-        return jsonify({"error": f"订阅转换失败 (HTTP {status})，可能订阅已过期或机场不可达"}), 502
-    except Exception as e:
-        log.warning("Refresh %s failed: %s", name, e)
-        return jsonify({"error": "订阅获取失败，请检查订阅链接是否有效"}), 502
+    except Exception:
+        # Subconverter fetch failed (provider may block its headers), retry via proxy
+        log.info("Refresh %s: direct fetch failed, retrying via proxy download", name)
+        try:
+            node_text = _fetch_nodes_via_proxy(raw_url)
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            log.warning("Refresh %s proxy HTTP %s: %s", name, status, e)
+            return jsonify({"error": f"订阅转换失败 (HTTP {status})，可能订阅已过期或机场不可达"}), 502
+        except Exception as e:
+            log.warning("Refresh %s failed: %s", name, e)
+            return jsonify({"error": "订阅获取失败，请检查订阅链接是否有效"}), 502
 
     node_count = len([l for l in node_text.splitlines() if l.strip()])
     if node_count == 0:
