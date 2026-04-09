@@ -333,21 +333,34 @@ def _check_heuristics(host):
 
 # ─── Shared query for new domains ────────────────────────────────────────────
 
-def _fetch_new_domains(db):
-    """Fetch domains seen in the last 60s that are not yet in suspicious_domains."""
+def _fetch_new_domains(db, since_dt=None):
+    """Fetch domains seen since since_dt that are not yet in suspicious_domains."""
     try:
         with db.cursor() as cur:
-            cur.execute("""
-                SELECT remote_host,
-                       COUNT(*) AS req_count,
-                       COUNT(DISTINCT mac_address) AS dev_count
-                FROM requests r
-                LEFT JOIN suspicious_domains sd ON sd.host = r.remote_host
-                WHERE r.start_date >= NOW() - INTERVAL 60 SECOND
-                  AND r.remote_host IS NOT NULL
-                  AND sd.host IS NULL
-                GROUP BY r.remote_host
-            """)
+            if since_dt is not None:
+                cur.execute("""
+                    SELECT remote_host,
+                           COUNT(*) AS req_count,
+                           COUNT(DISTINCT mac_address) AS dev_count
+                    FROM requests r
+                    LEFT JOIN suspicious_domains sd ON sd.host = r.remote_host
+                    WHERE r.start_date >= %s
+                      AND r.remote_host IS NOT NULL
+                      AND sd.host IS NULL
+                    GROUP BY r.remote_host
+                """, (since_dt,))
+            else:
+                cur.execute("""
+                    SELECT remote_host,
+                           COUNT(*) AS req_count,
+                           COUNT(DISTINCT mac_address) AS dev_count
+                    FROM requests r
+                    LEFT JOIN suspicious_domains sd ON sd.host = r.remote_host
+                    WHERE r.start_date >= NOW() - INTERVAL 60 SECOND
+                      AND r.remote_host IS NOT NULL
+                      AND sd.host IS NULL
+                    GROUP BY r.remote_host
+                """)
             return cur.fetchall()
     except Exception as e:
         log.warning(f"new domains query failed: {e}")
@@ -476,9 +489,11 @@ def check_domains_blocklist(db, prefetched_rows=None):
         return 0
 
     count = 0
+    flagged_hosts = set()
     for m in matches:
         row = host_map[m["domain"]]
         host = row["remote_host"]
+        flagged_hosts.add(m["domain"])
         try:
             with db.cursor() as cur:
                 cur.execute("""
@@ -499,6 +514,57 @@ def check_domains_blocklist(db, prefetched_rows=None):
             log.info(f"blocklist flagged [{m['severity']}] {host}: {m['reason']}")
         except Exception as e:
             log.warning(f"failed to insert blocklist flag for {host}: {e}")
+
+    # Suffix matching: check parent domains of unflagged hosts
+    parent_map = {}  # parent_domain -> [(stripped_domain, original_row)]
+    for stripped, row in host_map.items():
+        if stripped in flagged_hosts:
+            continue
+        labels = stripped.split(".")
+        for i in range(1, len(labels) - 1):  # skip the TLD alone
+            parent = ".".join(labels[i:])
+            parent_map.setdefault(parent, []).append((stripped, row))
+
+    if parent_map:
+        parent_placeholders = ",".join(["%s"] * len(parent_map))
+        try:
+            with db.cursor() as cur:
+                cur.execute(
+                    f"SELECT domain, severity, reason FROM domain_blocklist WHERE domain IN ({parent_placeholders})",
+                    list(parent_map.keys()),
+                )
+                suffix_matches = cur.fetchall()
+        except Exception as e:
+            log.warning(f"blocklist suffix lookup failed: {e}")
+            suffix_matches = []
+
+        for m in suffix_matches:
+            for stripped, row in parent_map[m["domain"]]:
+                if stripped in flagged_hosts:
+                    continue
+                flagged_hosts.add(stripped)
+                host = row["remote_host"]
+                reason = f"{m['reason']}（父域名 {m['domain']} 命中黑名单）"
+                try:
+                    with db.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO suspicious_domains
+                                (host, detection_type, reason, severity, request_count, device_count)
+                            VALUES (%s, 'blocklist', %s, %s, %s, %s)
+                            AS new
+                            ON DUPLICATE KEY UPDATE
+                                last_seen=NOW(),
+                                reason=new.reason,
+                                severity=GREATEST(severity, new.severity),
+                                request_count=GREATEST(request_count, new.request_count),
+                                device_count=GREATEST(device_count, new.device_count)
+                        """, (host, reason, m["severity"],
+                              int(row["req_count"]), int(row["dev_count"])))
+                    db.commit()
+                    count += 1
+                    log.info(f"blocklist suffix flagged [{m['severity']}] {host}: {reason}")
+                except Exception as e:
+                    log.warning(f"failed to insert blocklist suffix flag for {host}: {e}")
 
     return count
 

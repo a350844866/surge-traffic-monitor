@@ -182,21 +182,24 @@ def _ssh_read_file(path):
 def _ssh_write_file(path, content):
     tmp_local = os.path.join(tempfile.gettempdir(), f"_airport_local_{os.getpid()}.tmp")
     tmp_remote = f"/tmp/_airport_remote_{os.getpid()}.tmp"
-    with open(tmp_local, "w", encoding="utf-8") as f:
-        f.write(content)
-    pw_file = _write_pass_file()
     try:
-        scp_args = [
-            "sshpass", "-f", pw_file, "scp",
-            *_SSH_OPTS,
-            tmp_local,
-            f"{config.SURGE_SSH_USER}@{config.SURGE_HOST}:{tmp_remote}",
-        ]
-        subprocess.run(scp_args, timeout=15, check=True)
+        with open(tmp_local, "w", encoding="utf-8") as f:
+            f.write(content)
+        pw_file = _write_pass_file()
+        try:
+            scp_args = [
+                "sshpass", "-f", pw_file, "scp",
+                *_SSH_OPTS,
+                tmp_local,
+                f"{config.SURGE_SSH_USER}@{config.SURGE_HOST}:{tmp_remote}",
+            ]
+            subprocess.run(scp_args, timeout=15, check=True)
+        finally:
+            os.unlink(pw_file)
+        _ssh_cmd(["mv", tmp_remote, path])
     finally:
-        os.unlink(pw_file)
-    _ssh_cmd(["mv", tmp_remote, path])
-    os.unlink(tmp_local)
+        if os.path.exists(tmp_local):
+            os.unlink(tmp_local)
 
 
 # ── Surge config patching ─────────────────────────────────────

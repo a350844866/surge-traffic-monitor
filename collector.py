@@ -355,11 +355,14 @@ def main():
             sync_sqlite_daily(db)
             set_state(db, last_sqlite_sync_key, int(time.time()))
 
-        # Task 4 & 5: Suspicious domain checks (shared query, every cycle)
-        new_domain_rows = _fetch_new_domains(db)
+        # Task 4 & 5: Suspicious domain checks (incremental window)
+        last_domain_check = get_state(db, "last_domain_check_time")
+        since_dt = datetime.strptime(last_domain_check, "%Y-%m-%d %H:%M:%S") if last_domain_check else None
+        new_domain_rows = _fetch_new_domains(db, since_dt=since_dt)
         if new_domain_rows is not None:
             check_new_domains_heuristic(db, prefetched_rows=new_domain_rows)
             check_domains_blocklist(db, prefetched_rows=new_domain_rows)
+            set_state(db, "last_domain_check_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
         # Task 6: Update suspicious domain stats (once per day)
         last_stats_update = get_state(db, "last_suspicious_stats_update") or ""

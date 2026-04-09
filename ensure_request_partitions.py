@@ -73,6 +73,45 @@ def ensure_request_partitions(db, months_ahead=None):
     return created
 
 
+def drop_old_partitions(db, keep_months=None):
+    """Drop monthly partitions older than keep_months.
+
+    Set REQUEST_RETENTION_MONTHS in config (0 = disabled, keep all data).
+    """
+    keep_months = keep_months if keep_months is not None else config.REQUEST_RETENTION_MONTHS
+    if keep_months <= 0:
+        return []
+
+    cutoff = _add_months(_month_start(date.today()), -keep_months)
+    cutoff_name = f"p{cutoff:%Y%m}"
+
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT PARTITION_NAME
+            FROM INFORMATION_SCHEMA.PARTITIONS
+            WHERE TABLE_SCHEMA = %s
+              AND TABLE_NAME = 'requests'
+              AND PARTITION_NAME IS NOT NULL
+            """,
+            (config.MYSQL_DB,),
+        )
+        existing = {row["PARTITION_NAME"] for row in cur.fetchall()}
+
+    dropped = []
+    for pname in sorted(existing):
+        if pname == "p_future" or not pname.startswith("p20"):
+            continue
+        if pname < cutoff_name:
+            with db.cursor() as cur:
+                cur.execute(f"ALTER TABLE requests DROP PARTITION {pname}")
+            dropped.append(pname)
+
+    if dropped:
+        db.commit()
+    return dropped
+
+
 def main():
     db = get_db()
     try:
@@ -81,6 +120,12 @@ def main():
             log.info("created request partitions: %s", ", ".join(created))
         else:
             log.info("request partitions already cover the configured future window")
+
+        dropped = drop_old_partitions(db)
+        if dropped:
+            log.info("dropped old partitions: %s", ", ".join(dropped))
+        elif config.REQUEST_RETENTION_MONTHS > 0:
+            log.info("no partitions old enough to drop (retention: %d months)", config.REQUEST_RETENTION_MONTHS)
     finally:
         db.close()
 

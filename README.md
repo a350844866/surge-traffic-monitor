@@ -91,6 +91,7 @@ Linux 服务器
    - 可疑 TLD（.tk/.top/.xyz/.buzz/.gq/.ml/.cf/.ga/.pw/.click/.surf/.icu）→ LOW
 
 2. **本地黑名单**（URLhaus 恶意软件域名 → HIGH；StevenBlack 广告追踪 → LOW）
+   - 精确匹配 + 父域名后缀匹配：如 `sub.evil.com` 的父域名 `evil.com` 在黑名单中也会被标记
 
 **自动白名单机制：**
 - 新域名命中 `trusted_parent_domains` → 直接以 dismissed=1 入库，不出现在告警列表
@@ -253,6 +254,14 @@ python3 ensure_request_partitions.py
 ```
 
 该脚本会补齐 `requests` 表未来数月的月分区，避免新数据长期落入 `p_future`。
+
+如需自动清理旧数据，设置环境变量 `REQUEST_RETENTION_MONTHS`（默认 0 = 保留所有数据）。例如保留 6 个月：
+
+```bash
+REQUEST_RETENTION_MONTHS=6
+```
+
+`ensure_request_partitions.py` 会在补齐新分区后自动 DROP 超出保留期的旧分区。
 
 ## 机场管理
 

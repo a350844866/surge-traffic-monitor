@@ -181,8 +181,8 @@ def _run_ai_review_job(job_id, rows, model):
                             "UPDATE suspicious_domains SET dismissed=1, dismissed_at=NOW(), notes=%s WHERE host=%s AND dismissed=0",
                             ("[AI白名单] " + reason, host),
                         )
-                    if cur.rowcount > 0:
-                        dismissed_list.append((host, reason))
+                        if cur.rowcount > 0:
+                            dismissed_list.append((host, reason))
                 else:
                     kept_list.append((host, reason))
             db.commit()

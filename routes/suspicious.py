@@ -39,8 +39,7 @@ def api_suspicious():
     show_dismissed = request.args.get("show_dismissed") == "1"
     db = get_request_db()
     with db.cursor() as cur:
-        where = "" if show_dismissed else "WHERE dismissed=0"
-        cur.execute(f"""
+        cur.execute("""
             SELECT host, detection_type, reason, severity,
                    first_seen, last_seen, request_count, device_count,
                    dismissed, dismissed_at, notes,
@@ -48,13 +47,13 @@ def api_suspicious():
                    requests_7d, requests_prev_7d, bytes_7d,
                    device_count_7d, persistence_score
             FROM suspicious_domains
-            {where}
+            WHERE dismissed=0 OR %s
             ORDER BY
                 dismissed ASC,
                 persistence_score DESC,
                 FIELD(severity,'high','medium','low'),
                 last_seen DESC
-        """)
+        """, (show_dismissed,))
         rows = cur.fetchall()
 
     ip_re = re.compile(r'^(\d{1,3}(?:\.\d{1,3}){3})(:\d+)?$')

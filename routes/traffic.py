@@ -420,31 +420,24 @@ def api_policy_groups():
     db = get_request_db()
     with db.cursor() as cur:
         cur.execute("""
-            SELECT rule, policy_type,
-                SUM(total_bytes) AS total_bytes,
-                SUM(download)    AS download,
-                SUM(upload)      AS upload,
-                COUNT(*)         AS requests,
-                COUNT(DISTINCT mac_address) AS devices
-            FROM (
-                SELECT
-                    rule,
-                    mac_address,
-                    CASE WHEN policy_name IS NULL OR policy_name = 'DIRECT' THEN 'DIRECT'
-                         WHEN policy_name IN ('REJECT', 'REJECT-DROP') THEN 'REJECT'
-                         ELSE 'PROXY' END AS policy_type,
-                    in_bytes + out_bytes AS total_bytes,
-                    in_bytes             AS download,
-                    out_bytes            AS upload
-                FROM requests
-                WHERE start_date >= %s AND start_date < %s
-            ) t
-            GROUP BY rule, policy_type
-            ORDER BY total_bytes DESC
+            SELECT
+                rule,
+                mac_address,
+                CASE WHEN policy_name IS NULL OR policy_name = 'DIRECT' THEN 'DIRECT'
+                     WHEN policy_name IN ('REJECT', 'REJECT-DROP') THEN 'REJECT'
+                     ELSE 'PROXY' END AS policy_type,
+                SUM(in_bytes + out_bytes) AS total_bytes,
+                SUM(in_bytes)             AS download,
+                SUM(out_bytes)            AS upload,
+                COUNT(*)                  AS requests
+            FROM requests
+            WHERE start_date >= %s AND start_date < %s
+            GROUP BY rule, mac_address, policy_type
         """, (start_dt, end_dt))
         rows = cur.fetchall()
 
     group_agg = {}
+    group_devices = {}
     for row in rows:
         policy_type = row["policy_type"]
         if policy_type == "DIRECT":
@@ -461,13 +454,17 @@ def api_policy_groups():
                 "download": 0,
                 "upload": 0,
                 "requests": 0,
-                "devices": 0,
             }
+            group_devices[group] = set()
         group_agg[group]["total_bytes"] += int(row["total_bytes"])
         group_agg[group]["download"] += int(row["download"])
         group_agg[group]["upload"] += int(row["upload"])
         group_agg[group]["requests"] += int(row["requests"])
-        group_agg[group]["devices"] += int(row["devices"])
+        if row["mac_address"]:
+            group_devices[group].add(row["mac_address"])
+
+    for group in group_agg:
+        group_agg[group]["devices"] = len(group_devices[group])
 
     result = sorted(
         group_agg.values(),
