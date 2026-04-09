@@ -551,7 +551,7 @@ def airport_node_status():
             nodes = groups.get(f"{name}-select", [])
 
         node_list = []
-        counts = {"excellent": 0, "good": 0, "usable": 0, "timeout": 0}
+        counts = {"excellent": 0, "good": 0, "pass": 0, "timeout": 0}
         total = 0
 
         for n in nodes:
@@ -564,35 +564,37 @@ def airport_node_status():
             error_msg = bench.get("lastTestErrorMessage")
 
             if latency <= 0:
-                status = "timeout"
+                quality = "timeout"
             elif not error_msg and latency < 200:
-                status = "excellent"   # 优秀: fast + clean
+                quality = "excellent"  # 优秀
             elif not error_msg or latency < 300:
-                status = "good"        # 良好: clean but slow, or fast with error
+                quality = "good"       # 良好
             else:
-                status = "usable"      # 可用: slow + has error
-            counts[status] += 1
+                quality = "pass"       # 及格
+            counts[quality] += 1
 
             node_list.append({
                 "name": n.get("name", ""),
                 "type": n.get("typeDescription", ""),
                 "latency": latency,
-                "status": status,
+                "quality": quality,
                 "error": error_msg,
             })
 
-        _STATUS_ORDER = {"excellent": 0, "good": 1, "usable": 2, "timeout": 3}
+        _Q_ORDER = {"excellent": 0, "good": 1, "pass": 2, "timeout": 3}
         node_list.sort(key=lambda x: (
-            _STATUS_ORDER.get(x["status"], 9),
+            _Q_ORDER.get(x["quality"], 9),
             x["latency"] if x["latency"] > 0 else 99999,
         ))
 
+        alive = counts["excellent"] + counts["good"] + counts["pass"]
         result[name] = {
             "total": total,
+            "alive": alive,
+            "timeout": counts["timeout"],
             "excellent": counts["excellent"],
             "good": counts["good"],
-            "usable": counts["usable"],
-            "timeout": counts["timeout"],
+            "pass": counts["pass"],
             "nodes": node_list,
         }
 

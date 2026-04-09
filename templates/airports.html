@@ -186,46 +186,54 @@ function toggleEntryDetail(name) {
   if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 
-const STATUS_CFG = {
-  excellent: {color:'#34d399', dot:'●', label:'优秀'},
-  good:      {color:'#60a5fa', dot:'●', label:'良好'},
-  usable:    {color:'#fbbf24', dot:'●', label:'可用'},
-  timeout:   {color:'#ef4444', dot:'●', label:'超时'},
+const Q_CFG = {
+  excellent: {color:'#34d399', label:'优秀'},
+  good:      {color:'#60a5fa', label:'良好'},
+  pass:      {color:'#fbbf24', label:'及格'},
+  timeout:   {color:'#ef4444', label:'超时'},
 };
 
 function latencyColor(ms) {
   if (ms <= 0) return '#6b7280';
   if (ms < 200) return '#34d399';
   if (ms < 300) return '#60a5fa';
-  if (ms < 500) return '#fbbf24';
-  return '#f87171';
+  return '#fbbf24';
 }
 
 function statusBar(s) {
   if (!s || !s.total) return '';
   const t = s.total;
+  // Top line: alive / total
+  const aliveColor = s.alive === t ? '#34d399' : s.alive > t/2 ? '#60a5fa' : '#f87171';
+  // Quality segments within the bar
   const seg = [
     {n: s.excellent, c: '#34d399'},
     {n: s.good,      c: '#60a5fa'},
-    {n: s.usable,    c: '#fbbf24'},
+    {n: s.pass,      c: '#fbbf24'},
     {n: s.timeout,   c: '#ef4444'},
   ];
   const bar = seg.map(g =>
     g.n > 0 ? `<div style="width:${(g.n/t*100).toFixed(1)}%;height:100%;background:${g.c}"></div>` : ''
   ).join('');
 
+  // Quality breakdown tags
   const tags = [];
   if (s.excellent) tags.push(`<span style="color:#34d399">${s.excellent} 优秀</span>`);
   if (s.good) tags.push(`<span style="color:#60a5fa">${s.good} 良好</span>`);
-  if (s.usable) tags.push(`<span style="color:#fbbf24">${s.usable} 可用</span>`);
+  if (s.pass) tags.push(`<span style="color:#fbbf24">${s.pass} 及格</span>`);
   if (s.timeout) tags.push(`<span style="color:#ef4444">${s.timeout} 超时</span>`);
 
   return `
-    <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
-      <div style="flex:1;height:6px;background:#1e293b;border-radius:3px;overflow:hidden;max-width:200px;display:flex">
-        ${bar}
+    <div style="margin-top:8px">
+      <div style="font-size:12px;margin-bottom:4px">
+        可用 <b style="color:${aliveColor}">${s.alive}</b><span style="color:#64748b">/${t}</span>
       </div>
-      <span style="font-size:11px;display:flex;gap:8px">${tags.join('')}</span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="flex:0 0 200px;height:6px;background:#1e293b;border-radius:3px;overflow:hidden;display:flex">
+          ${bar}
+        </div>
+        <span style="font-size:11px;display:flex;gap:8px;flex-wrap:wrap">${tags.join('')}</span>
+      </div>
     </div>`;
 }
 
@@ -234,20 +242,20 @@ function nodeTable(name, nodes) {
   let html = `<div id="nodes-${name}" style="display:none;margin-top:10px">
     <table style="width:100%;font-size:12px;border-collapse:collapse">
       <thead><tr style="color:#64748b;text-align:left;border-bottom:1px solid #1e293b">
-        <th style="padding:4px 8px">状态</th>
+        <th style="padding:4px 8px">品质</th>
         <th style="padding:4px 8px">节点名称</th>
         <th style="padding:4px 8px">协议</th>
         <th style="padding:4px 8px;text-align:right">延迟</th>
       </tr></thead><tbody>`;
   for (const n of nodes) {
-    const cfg = STATUS_CFG[n.status] || STATUS_CFG.timeout;
-    const dot = `<span style="color:${cfg.color}" title="${cfg.label}">${cfg.dot}</span>`;
+    const cfg = Q_CFG[n.quality] || Q_CFG.timeout;
+    const badge = `<span style="color:${cfg.color};font-size:11px">${cfg.label}</span>`;
     const lat = n.latency > 0
       ? `<span style="color:${latencyColor(n.latency)}">${n.latency}ms</span>`
       : '<span style="color:#6b7280">—</span>';
     const errTip = n.error ? ` title="${n.error.replace(/"/g,'&quot;')}"` : '';
     html += `<tr style="border-bottom:1px solid #111827"${errTip}>
-      <td style="padding:3px 8px">${dot}</td>
+      <td style="padding:3px 8px">${badge}</td>
       <td style="padding:3px 8px;color:#cbd5e1;font-family:monospace">${n.name}</td>
       <td style="padding:3px 8px;color:#64748b">${n.type}</td>
       <td style="padding:3px 8px;text-align:right">${lat}</td>
