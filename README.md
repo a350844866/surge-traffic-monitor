@@ -84,11 +84,11 @@ Linux 服务器
 
 1. **启发式规则**（`detector.py`）
    - Shannon 熵 > 4.5 且标签长度 ≥ 8 → HIGH（疑似 DGA）
-   - 裸 IP 访问（非内网）→ MEDIUM
-   - 数字占比 > 60% → HIGH
+   - 裸 IP 访问（非内网）→ LOW（大多为正常 APP 连接）
+   - 数字占比 > 80% 且标签长度 ≥ 10 → HIGH（避免 UUID 子域名误报）
    - 子域名层级 > 6 → MEDIUM（疑似 DNS 隧道）
    - 域名总长 > 80 字符 → MEDIUM
-   - 可疑 TLD（.tk/.top/.xyz 等）→ LOW
+   - 可疑 TLD（.tk/.top/.xyz/.buzz/.gq/.ml/.cf/.ga/.pw/.click/.surf/.icu）→ LOW
 
 2. **本地黑名单**（URLhaus 恶意软件域名 → HIGH；StevenBlack 广告追踪 → LOW）
 

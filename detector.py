@@ -172,6 +172,17 @@ SAFE_DOMAINS = {
     "openrouter.ai", "openai.com", "anthropic.com",
     "ntp.org", "pool.ntp.org",
     "home-assistant.io",
+    "app.link", "app.goo.gl",
+    "reddit.com", "redd.it",
+    "spotify.com", "scdn.co",
+    "twitch.tv",
+    "discord.com", "discord.gg", "discordapp.com",
+    "linkedin.com",
+    "notion.so", "notion.com",
+    "slack.com",
+    "zoom.us",
+    "vercel.app", "vercel.com", "netlify.app", "netlify.com",
+    "supabase.co", "supabase.com",
 }
 
 # Safe domain suffixes (match if host ends with these)
@@ -203,15 +214,25 @@ SAFE_SUFFIXES = (
     ".plex.direct", ".plex.tv",
     ".synology.com", ".synology.me",
     ".ndmdhs.com",  # Netease DRM
+    # App deep links
+    ".app.link", ".app.goo.gl",
+    # Chinese cloud / CDN
+    ".huaweicloud.com", ".hwcloudtest.cn", ".volcengine.com", ".volces.com",
+    ".ctyun.cn", ".ucloud.cn",
+    ".cdn20.com", ".kunlunsl.com", ".chinanetcenter.com",
+    # Gaming / streaming
+    ".mihoyo.com", ".hoyoverse.com",
+    ".kuaishou.com", ".gifshow.com",
+    ".iqiyipic.com", ".qiyipic.com",
 )
 _SAFE_DOMAIN_SET = frozenset(SAFE_DOMAINS)
 _SAFE_SUFFIX_SET = frozenset(s.lstrip(".") for s in SAFE_SUFFIXES)
 
-# Suspicious TLDs
+# Suspicious TLDs — only truly abused free/cheap TLDs
+# Removed: .work .link .live .vip .club .cc (too many legitimate uses)
 SUSPICIOUS_TLDS = {
     ".tk", ".top", ".xyz", ".buzz", ".gq", ".ml", ".cf", ".ga",
-    ".pw", ".cc", ".work", ".click", ".link", ".surf", ".icu",
-    ".live", ".vip", ".club",
+    ".pw", ".click", ".surf", ".icu",
 }
 
 
@@ -271,12 +292,13 @@ def _check_heuristics(host):
     """
     h = _strip_port(host).lower().rstrip(".")
 
-    # Bare IP address (after port stripping) — skip private/loopback ranges
+    # Bare IP address (after port stripping) — skip private/loopback/reserved
     host_ip = _parse_ip_literal(h)
     if host_ip is not None:
         if host_ip.is_private or host_ip.is_loopback or host_ip.is_link_local:
             return None, None
-        return "medium", f"直接 IP 访问（{h}），绕过 DNS 解析"
+        # Bare IP is common for apps (push, P2P, games); flag as low
+        return "low", f"直接 IP 访问（{h}），绕过 DNS 解析"
 
     labels = h.split(".")
     tld = "." + labels[-1] if labels else ""
@@ -287,10 +309,11 @@ def _check_heuristics(host):
     if entropy > 4.5 and len(longest_label) >= 8:
         return "high", f"域名熵值过高({entropy:.2f})，疑似 DGA 生成域名"
 
-    # Numeric/hex heavy label
-    if longest_label and len(longest_label) >= 8:
+    # Numeric/hex heavy label — stricter: require pure digits or very high ratio
+    # UUID-style subdomains (hex+digits) are common for CDNs, so raise threshold
+    if longest_label and len(longest_label) >= 10:
         digit_ratio = sum(1 for c in longest_label if c.isdigit()) / len(longest_label)
-        if digit_ratio > 0.6:
+        if digit_ratio > 0.8:
             return "high", f"标签中数字占比过高({digit_ratio:.0%})，疑似 DGA 变种"
 
     # Excessive subdomain depth (possible DNS tunneling)

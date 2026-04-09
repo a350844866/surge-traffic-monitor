@@ -416,8 +416,13 @@ def add_airport():
     subconv_url = _build_subconv_url(subscribe_url)
     try:
         node_text = _fetch_nodes(subconv_url)
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 0
+        log.warning("Add %s subconverter HTTP %s: %s", name, status, e)
+        return jsonify({"error": f"订阅转换失败 (HTTP {status})，请检查订阅链接"}), 502
     except Exception as e:
-        return jsonify({"error": f"Failed to fetch nodes: {e}"}), 502
+        log.warning("Add %s fetch failed: %s", name, e)
+        return jsonify({"error": "订阅获取失败，请检查订阅链接是否有效"}), 502
 
     node_count = len([l for l in node_text.splitlines() if l.strip()])
     if node_count == 0:
@@ -494,12 +499,17 @@ def refresh_airport(name):
     url = info.get("subconverter_url") or _build_subconv_url(info["subscribe_url"])
     try:
         node_text = _fetch_nodes(url)
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 0
+        log.warning("Refresh %s subconverter HTTP %s: %s", name, status, e)
+        return jsonify({"error": f"订阅转换失败 (HTTP {status})，可能订阅已过期或机场不可达"}), 502
     except Exception as e:
-        return jsonify({"error": f"Fetch failed: {e}"}), 502
+        log.warning("Refresh %s failed: %s", name, e)
+        return jsonify({"error": "订阅获取失败，请检查订阅链接是否有效"}), 502
 
     node_count = len([l for l in node_text.splitlines() if l.strip()])
     if node_count == 0:
-        return jsonify({"error": "No valid nodes returned"}), 422
+        return jsonify({"error": "未获取到有效节点，订阅可能已过期"}), 422
 
     fpath = SUB_STORE / f"{name}_surge.txt"
     fpath.write_text(node_text, "utf-8")
