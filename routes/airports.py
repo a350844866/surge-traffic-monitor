@@ -551,8 +551,7 @@ def airport_node_status():
             nodes = groups.get(f"{name}-select", [])
 
         node_list = []
-        alive = 0
-        timeout_count = 0
+        counts = {"excellent": 0, "good": 0, "usable": 0, "timeout": 0}
         total = 0
 
         for n in nodes:
@@ -564,14 +563,15 @@ def airport_node_status():
             latency = bench.get("lastTestScoreInMS", -1)
             error_msg = bench.get("lastTestErrorMessage")
 
-            # Surge considers a node reachable if lastTestScoreInMS > 0,
-            # even when there's an error like "超时（等待 HTTP 响应）"
-            if latency > 0:
-                status = "alive"
-                alive += 1
-            else:
+            if latency <= 0:
                 status = "timeout"
-                timeout_count += 1
+            elif not error_msg and latency < 200:
+                status = "excellent"   # 优秀: fast + clean
+            elif not error_msg or latency < 300:
+                status = "good"        # 良好: clean but slow, or fast with error
+            else:
+                status = "usable"      # 可用: slow + has error
+            counts[status] += 1
 
             node_list.append({
                 "name": n.get("name", ""),
@@ -581,13 +581,18 @@ def airport_node_status():
                 "error": error_msg,
             })
 
-        # Sort: alive first (by latency asc), then timeout
-        node_list.sort(key=lambda x: (x["status"] != "alive", x["latency"] if x["latency"] > 0 else 99999))
+        _STATUS_ORDER = {"excellent": 0, "good": 1, "usable": 2, "timeout": 3}
+        node_list.sort(key=lambda x: (
+            _STATUS_ORDER.get(x["status"], 9),
+            x["latency"] if x["latency"] > 0 else 99999,
+        ))
 
         result[name] = {
             "total": total,
-            "alive": alive,
-            "timeout": timeout_count,
+            "excellent": counts["excellent"],
+            "good": counts["good"],
+            "usable": counts["usable"],
+            "timeout": counts["timeout"],
             "nodes": node_list,
         }
 

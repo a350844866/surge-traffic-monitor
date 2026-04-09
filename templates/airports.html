@@ -186,27 +186,46 @@ function toggleEntryDetail(name) {
   if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 
+const STATUS_CFG = {
+  excellent: {color:'#34d399', dot:'●', label:'优秀'},
+  good:      {color:'#60a5fa', dot:'●', label:'良好'},
+  usable:    {color:'#fbbf24', dot:'●', label:'可用'},
+  timeout:   {color:'#ef4444', dot:'●', label:'超时'},
+};
+
 function latencyColor(ms) {
   if (ms <= 0) return '#6b7280';
-  if (ms < 150) return '#34d399';
-  if (ms < 300) return '#fbbf24';
+  if (ms < 200) return '#34d399';
+  if (ms < 300) return '#60a5fa';
+  if (ms < 500) return '#fbbf24';
   return '#f87171';
 }
 
-function latencyBar(alive, timeout, total) {
-  if (!total) return '';
-  const pct = Math.round(alive / total * 100);
-  const alivePct = (alive / total * 100).toFixed(1);
-  const timeoutPct = (timeout / total * 100).toFixed(1);
-  const barColor = pct >= 80 ? '#34d399' : pct >= 50 ? '#fbbf24' : '#f87171';
+function statusBar(s) {
+  if (!s || !s.total) return '';
+  const t = s.total;
+  const seg = [
+    {n: s.excellent, c: '#34d399'},
+    {n: s.good,      c: '#60a5fa'},
+    {n: s.usable,    c: '#fbbf24'},
+    {n: s.timeout,   c: '#ef4444'},
+  ];
+  const bar = seg.map(g =>
+    g.n > 0 ? `<div style="width:${(g.n/t*100).toFixed(1)}%;height:100%;background:${g.c}"></div>` : ''
+  ).join('');
+
+  const tags = [];
+  if (s.excellent) tags.push(`<span style="color:#34d399">${s.excellent} 优秀</span>`);
+  if (s.good) tags.push(`<span style="color:#60a5fa">${s.good} 良好</span>`);
+  if (s.usable) tags.push(`<span style="color:#fbbf24">${s.usable} 可用</span>`);
+  if (s.timeout) tags.push(`<span style="color:#ef4444">${s.timeout} 超时</span>`);
+
   return `
     <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
-      <div style="flex:1;height:6px;background:#1e293b;border-radius:3px;overflow:hidden;max-width:180px">
-        <div style="width:${alivePct}%;height:100%;background:${barColor};border-radius:3px"></div>
+      <div style="flex:1;height:6px;background:#1e293b;border-radius:3px;overflow:hidden;max-width:200px;display:flex">
+        ${bar}
       </div>
-      <span style="font-size:12px;color:${barColor};font-weight:600">${alive}/${total}</span>
-      <span style="font-size:11px;color:#64748b">可用</span>
-      ${timeout > 0 ? `<span style="font-size:11px;color:#f87171">${timeout} 超时</span>` : ''}
+      <span style="font-size:11px;display:flex;gap:8px">${tags.join('')}</span>
     </div>`;
 }
 
@@ -221,10 +240,11 @@ function nodeTable(name, nodes) {
         <th style="padding:4px 8px;text-align:right">延迟</th>
       </tr></thead><tbody>`;
   for (const n of nodes) {
-    const dot = n.status === 'alive'
-      ? '<span style="color:#34d399">●</span>'
-      : '<span style="color:#ef4444">●</span>';
-    const lat = n.latency > 0 ? `<span style="color:${latencyColor(n.latency)}">${n.latency}ms</span>` : '<span style="color:#6b7280">—</span>';
+    const cfg = STATUS_CFG[n.status] || STATUS_CFG.timeout;
+    const dot = `<span style="color:${cfg.color}" title="${cfg.label}">${cfg.dot}</span>`;
+    const lat = n.latency > 0
+      ? `<span style="color:${latencyColor(n.latency)}">${n.latency}ms</span>`
+      : '<span style="color:#6b7280">—</span>';
     const errTip = n.error ? ` title="${n.error.replace(/"/g,'&quot;')}"` : '';
     html += `<tr style="border-bottom:1px solid #111827"${errTip}>
       <td style="padding:3px 8px">${dot}</td>
@@ -281,7 +301,7 @@ function renderAirports() {
             <span>文件更新: ${mtime}</span>
             ${a.file_exists ? '<span style="color:#34d399">文件正常</span>' : '<span style="color:#f87171">文件缺失</span>'}
           </div>
-          ${s.total ? latencyBar(s.alive, s.timeout, s.total) : ''}
+          ${s.total ? statusBar(s) : ''}
           <div id="entry-${name}" style="min-height:20px">
             <span style="font-size:11px;color:#475569">入口分析中...</span>
           </div>
