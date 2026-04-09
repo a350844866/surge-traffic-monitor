@@ -9,11 +9,13 @@ File serving:
   /sub/<filename>    - serves node files (basic auth required if ?auth=1)
 """
 
+import hmac
 import json
 import logging
 import os
 import re
 import subprocess
+import tempfile
 import time
 from functools import wraps
 from pathlib import Path
@@ -43,8 +45,10 @@ FILE_AUTH_PASS = config.AIRPORT_FILE_AUTH_PASS
 # ── file serving ───────────────────────────────────────────────
 def _check_basic_auth():
     auth = request.authorization
-    if auth and auth.username == FILE_AUTH_USER and auth.password == FILE_AUTH_PASS:
+    if auth and hmac.compare_digest(auth.username, FILE_AUTH_USER) \
+            and hmac.compare_digest(auth.password, FILE_AUTH_PASS):
         return True
+    log.warning("Basic auth failed from %s", request.remote_addr)
     return False
 
 
@@ -53,12 +57,18 @@ def serve_node_file(filename):
     """Serve node files. Requires basic auth when accessed externally (via NPM)."""
     if not filename.endswith("_surge.txt"):
         abort(404)
-    fpath = SUB_STORE / filename
+    fpath = (SUB_STORE / filename).resolve()
+    if not str(fpath).startswith(str(SUB_STORE.resolve())):
+        abort(404)
     if not fpath.exists():
         abort(404)
     # Check if request comes from LAN (no auth needed) or external (auth needed)
     remote = request.remote_addr or ""
-    is_lan = remote.startswith("192.168.") or remote.startswith("10.") or remote == "127.0.0.1"
+    try:
+        import ipaddress as _ipa
+        is_lan = _ipa.ip_address(remote).is_private
+    except ValueError:
+        is_lan = False
     if not is_lan and not _check_basic_auth():
         return Response(
             "Authentication required",
@@ -109,37 +119,62 @@ def _fetch_nodes(subconv_url):
     return "\n".join(lines) + "\n"
 
 
-def _ssh_cmd(cmd):
-    full = (
-        f'sshpass -p "{config.SURGE_SSH_PASS}" ssh '
-        f"-o StrictHostKeyChecking=no "
-        f"-o PubkeyAuthentication=no "
-        f"-o GSSAPIAuthentication=no "
-        f"{config.SURGE_SSH_USER}@{config.SURGE_HOST} "
-        f"{cmd}"
+def _write_pass_file():
+    """Write SSH password to a secure temp file for sshpass -f."""
+    fd = os.open(
+        os.path.join(tempfile.gettempdir(), f"_ssh_pw_{os.getpid()}"),
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
     )
-    r = subprocess.run(full, shell=True, capture_output=True, timeout=15)
-    return r.stdout.decode("utf-8", errors="replace")
+    with os.fdopen(fd, "w") as f:
+        f.write(config.SURGE_SSH_PASS)
+    return f"/tmp/_ssh_pw_{os.getpid()}"
+
+
+_SSH_OPTS = [
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "PubkeyAuthentication=no",
+    "-o", "GSSAPIAuthentication=no",
+]
+
+
+def _ssh_cmd(cmd_args):
+    """Run a command on the remote host via SSH (no shell=True)."""
+    pw_file = _write_pass_file()
+    try:
+        args = [
+            "sshpass", "-f", pw_file, "ssh",
+            *_SSH_OPTS,
+            f"{config.SURGE_SSH_USER}@{config.SURGE_HOST}",
+            *cmd_args,
+        ]
+        r = subprocess.run(args, capture_output=True, timeout=15)
+        return r.stdout.decode("utf-8", errors="replace")
+    finally:
+        os.unlink(pw_file)
 
 
 def _ssh_read_file(path):
-    return _ssh_cmd(f'cat "{path}"')
+    return _ssh_cmd(["cat", path])
 
 
 def _ssh_write_file(path, content):
-    tmp_local = f"/tmp/_airport_local_{os.getpid()}.tmp"
+    tmp_local = os.path.join(tempfile.gettempdir(), f"_airport_local_{os.getpid()}.tmp")
     tmp_remote = f"/tmp/_airport_remote_{os.getpid()}.tmp"
     with open(tmp_local, "w", encoding="utf-8") as f:
         f.write(content)
-    scp = (
-        f'sshpass -p "{config.SURGE_SSH_PASS}" scp '
-        f"-o StrictHostKeyChecking=no "
-        f"-o PubkeyAuthentication=no "
-        f"-o GSSAPIAuthentication=no "
-        f'{tmp_local} {config.SURGE_SSH_USER}@{config.SURGE_HOST}:{tmp_remote}'
-    )
-    subprocess.run(scp, shell=True, timeout=15, check=True)
-    _ssh_cmd(f'mv {tmp_remote} "{path}"')
+    pw_file = _write_pass_file()
+    try:
+        scp_args = [
+            "sshpass", "-f", pw_file, "scp",
+            *_SSH_OPTS,
+            tmp_local,
+            f"{config.SURGE_SSH_USER}@{config.SURGE_HOST}:{tmp_remote}",
+        ]
+        subprocess.run(scp_args, timeout=15, check=True)
+    finally:
+        os.unlink(pw_file)
+    _ssh_cmd(["mv", tmp_remote, path])
     os.unlink(tmp_local)
 
 

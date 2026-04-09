@@ -4,7 +4,7 @@ Surge Traffic Dashboard - Flask Web App
 Port: 8866
 """
 
-from flask import Flask
+from flask import Flask, jsonify
 
 from routes.ai import bp as ai_bp
 from routes.airports import bp as airports_bp
@@ -21,6 +21,24 @@ app.register_blueprint(ai_bp)
 app.register_blueprint(suspicious_bp)
 app.register_blueprint(airports_bp)
 app.register_blueprint(pages_bp)
+
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": "Not Found"}), 404
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    return jsonify({"error": "Internal Server Error"}), 500
+
+
+@app.after_request
+def set_security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return response
 
 
 if __name__ == "__main__":

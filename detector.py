@@ -11,6 +11,7 @@ import math
 import time
 import logging
 import ipaddress
+import threading
 from datetime import date, datetime, timedelta
 
 from db import get_db
@@ -30,6 +31,7 @@ _trusted_patterns_expires = 0
 _trusted_asns_cache = set()    # set of ASN strings like "AS4134"
 _trusted_asns_expires = 0
 _TRUSTED_CACHE_TTL = 300       # 5 minutes
+_trusted_lock = threading.Lock()
 
 
 def _refresh_trusted_cache(db):
@@ -38,16 +40,20 @@ def _refresh_trusted_cache(db):
     now = time.time()
     if now < _trusted_patterns_expires:
         return
-    try:
-        with db.cursor() as cur:
-            cur.execute("SELECT pattern FROM trusted_parent_domains")
-            _trusted_patterns_cache = [r["pattern"].lower() for r in cur.fetchall()]
-            cur.execute("SELECT asn FROM trusted_asns")
-            _trusted_asns_cache = {r["asn"].upper() for r in cur.fetchall()}
-        _trusted_patterns_expires = now + _TRUSTED_CACHE_TTL
-        _trusted_asns_expires = now + _TRUSTED_CACHE_TTL
-    except Exception as e:
-        log.warning(f"Failed to refresh trusted cache: {e}")
+    with _trusted_lock:
+        # Double-check after acquiring lock
+        if now < _trusted_patterns_expires:
+            return
+        try:
+            with db.cursor() as cur:
+                cur.execute("SELECT pattern FROM trusted_parent_domains")
+                _trusted_patterns_cache = [r["pattern"].lower() for r in cur.fetchall()]
+                cur.execute("SELECT asn FROM trusted_asns")
+                _trusted_asns_cache = {r["asn"].upper() for r in cur.fetchall()}
+            _trusted_patterns_expires = now + _TRUSTED_CACHE_TTL
+            _trusted_asns_expires = now + _TRUSTED_CACHE_TTL
+        except Exception as e:
+            log.warning(f"Failed to refresh trusted cache: {e}")
 
 
 def _is_trusted_parent(host, db):
@@ -501,6 +507,9 @@ def update_suspicious_stats(db):
         for start in range(0, len(items), batch_size):
             yield items[start:start + batch_size]
 
+    # Limit scan to 30 days (active_days score caps at 30)
+    scan_start_dt = datetime.combine(today - timedelta(days=29), datetime.min.time())
+
     stats_by_host = {}
     days_by_host = {host: [] for host in hosts}
 
@@ -518,6 +527,7 @@ def update_suspicious_stats(db):
                     COUNT(DISTINCT DATE(start_date)) AS active_days
                 FROM requests
                 WHERE remote_host IN (""" + placeholders + """)
+                  AND start_date >= %s
                 GROUP BY remote_host
             """, (
                 recent_start_dt, recent_end_dt,
@@ -525,6 +535,7 @@ def update_suspicious_stats(db):
                 recent_start_dt, recent_end_dt,
                 recent_start_dt, recent_end_dt,
                 *batch_hosts,
+                scan_start_dt,
             ))
             for row in cur.fetchall():
                 stats_by_host[row["host"]] = row
@@ -533,9 +544,10 @@ def update_suspicious_stats(db):
                 SELECT remote_host AS host, DATE(start_date) AS active_day
                 FROM requests
                 WHERE remote_host IN (""" + placeholders + """)
+                  AND start_date >= %s
                 GROUP BY remote_host, DATE(start_date)
                 ORDER BY remote_host, active_day
-            """, (*batch_hosts,))
+            """, (*batch_hosts, scan_start_dt))
             for row in cur.fetchall():
                 days_by_host.setdefault(row["host"], []).append(row["active_day"])
 

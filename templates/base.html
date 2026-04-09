@@ -152,7 +152,7 @@ else if (path.startsWith('/suspicious')) document.getElementById('nav-suspicious
 // Show red dot on nav if there are active suspicious domains
 fetch('/api/suspicious/count').then(r=>r.json()).then(d=>{
   if(d.count>0) document.getElementById('nav-sus-badge').style.display='block';
-}).catch(()=>{});
+}).catch(e => console.warn('suspicious count fetch failed:', e));
 
 function fmtBytes(n) {
   if (!n) return '0 B';
@@ -278,7 +278,7 @@ function openAiModal(title, url) {
       raw += JSON.parse(e.data);
       body.innerHTML = '<span class="ai-cursor">' + renderMarkdown(raw) + '</span>';
       body.scrollTop = body.scrollHeight;
-    } catch {}
+    } catch (err) { console.warn('SSE parse error:', err); }
   };
   es.onerror = () => {
     es.close();

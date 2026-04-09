@@ -321,7 +321,7 @@ fetch('/api/suspicious/count').then(r=>r.json()).then(d=>{
     const banner=document.getElementById('suspicious-banner');
     banner.style.display='flex';
   }
-}).catch(()=>{});
+}).catch(e => console.warn('suspicious banner fetch failed:', e));
 
 document.getElementById('ai-btn').addEventListener('click', () => {
   const {start, end} = getRange();

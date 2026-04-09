@@ -328,13 +328,13 @@ function render() {
     // Trust button for IPs with known ASN (not yet dismissed / trusted)
     let trustBtn = '';
     if (isIP(r.host) && r.ip_asn && !r.dismissed) {
-      trustBtn = `<button class="trust-asn-btn" onclick="trustAsn('${esc(r.ip_asn)}','${esc(r.ip_org||r.ip_asn)}')"
+      trustBtn = `<button class="trust-asn-btn" data-action="trust-asn" data-asn="${r.ip_asn.replace(/"/g,'&quot;')}" data-org="${(r.ip_org||r.ip_asn).replace(/"/g,'&quot;')}"
                     style="margin-left:6px">🛡 信任机构</button>`;
     }
 
     const actionBtn = r.dismissed
-      ? `<button onclick="restore('${esc(r.host)}')" class="icon-btn" style="font-size:12px;opacity:.8">↩ 恢复</button>`
-      : `<button onclick="dismiss('${esc(r.host)}')" style="background:#1c0a0a;border:1px solid #7f1d1d;
+      ? `<button data-action="restore" data-host="${r.host.replace(/"/g,'&quot;')}" class="icon-btn" style="font-size:12px;opacity:.8">↩ 恢复</button>`
+      : `<button data-action="dismiss" data-host="${r.host.replace(/"/g,'&quot;')}" style="background:#1c0a0a;border:1px solid #7f1d1d;
            color:#fca5a5;padding:3px 10px;border-radius:5px;font-size:12px;cursor:pointer">✓ 安全</button>`;
 
     return `<tr style="${dim}">
@@ -358,7 +358,15 @@ function render() {
   }).join('');
 }
 
-function esc(s){ return (s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+// Event delegation for action buttons (replaces inline onclick + esc())
+document.getElementById('tbl-sus').addEventListener('click', function(e) {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  if (action === 'dismiss') dismiss(btn.dataset.host);
+  else if (action === 'restore') restore(btn.dataset.host);
+  else if (action === 'trust-asn') trustAsn(btn.dataset.asn, btn.dataset.org);
+});
 
 async function load() {
   const showDismissed = document.getElementById('show-dismissed').checked;
@@ -553,7 +561,7 @@ async function loadTrustedDomains() {
     <td style="font-family:monospace;font-size:13px;color:#93c5fd">*.${r.pattern}</td>
     <td style="color:#94a3b8;font-size:13px">${r.reason||'—'}</td>
     <td style="color:#475569;font-size:12px">${fmtDate(r.added_at)}</td>
-    <td><button onclick="deleteTrustedDomain('${esc(r.pattern)}')"
+    <td><button data-action="delete-domain" data-pattern="${r.pattern.replace(/"/g,'&quot;')}"
           style="background:#1c0a0a;border:1px solid #7f1d1d;color:#fca5a5;
                  padding:2px 8px;border-radius:4px;font-size:11px;cursor:pointer">删除</button></td>
   </tr>`).join('');
@@ -595,7 +603,7 @@ async function loadTrustedAsns() {
     <td style="color:#94a3b8;font-size:13px">${r.reason||'—'}</td>
     <td style="color:#64748b;font-size:13px;text-align:center">${r.dismissed_count||0}</td>
     <td style="color:#475569;font-size:12px">${fmtDate(r.added_at)}</td>
-    <td><button onclick="deleteTrustedAsn('${esc(r.asn)}')"
+    <td><button data-action="delete-asn" data-asn="${r.asn.replace(/"/g,'&quot;')}"
           style="background:#1c0a0a;border:1px solid #7f1d1d;color:#fca5a5;
                  padding:2px 8px;border-radius:4px;font-size:11px;cursor:pointer">删除</button></td>
   </tr>`).join('');
@@ -606,6 +614,16 @@ async function deleteTrustedAsn(asn) {
   await fetch('/api/trusted/asns/'+encodeURIComponent(asn), {method:'DELETE'});
   await loadTrustedAsns();
 }
+
+// Event delegation for trusted domain/ASN tables
+document.getElementById('tbl-trusted-domains').addEventListener('click', function(e) {
+  const btn = e.target.closest('[data-action="delete-domain"]');
+  if (btn) deleteTrustedDomain(btn.dataset.pattern);
+});
+document.getElementById('tbl-trusted-asns').addEventListener('click', function(e) {
+  const btn = e.target.closest('[data-action="delete-asn"]');
+  if (btn) deleteTrustedAsn(btn.dataset.asn);
+});
 
 updateSortIcons();
 

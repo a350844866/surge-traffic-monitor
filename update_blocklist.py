@@ -82,16 +82,20 @@ def update_source(db, src):
         "INSERT IGNORE INTO domain_blocklist (domain, source, severity, reason) "
         "VALUES (%s,%s,%s,%s)"
     )
-    with db.cursor() as cur:
-        cur.execute("DELETE FROM domain_blocklist WHERE source=%s", (src["name"],))
-        for i in range(0, len(unique_domains), batch):
-            rows = [
-                (d, src["name"], src["severity"], src["reason"])
-                for d in unique_domains[i:i + batch]
-            ]
-            cur.executemany(sql, rows)
-            total += len(rows)
-    db.commit()
+    try:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM domain_blocklist WHERE source=%s", (src["name"],))
+            for i in range(0, len(unique_domains), batch):
+                rows = [
+                    (d, src["name"], src["severity"], src["reason"])
+                    for d in unique_domains[i:i + batch]
+                ]
+                cur.executemany(sql, rows)
+                total += len(rows)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     log.info(f"{src['name']}: {total} rows inserted")
     return total

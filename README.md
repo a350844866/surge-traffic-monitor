@@ -95,7 +95,7 @@ Linux 服务器
 **自动白名单机制：**
 - 新域名命中 `trusted_parent_domains` → 直接以 dismissed=1 入库，不出现在告警列表
 - 裸 IP 查 ASN 后命中 `trusted_asns` → 同上自动 dismiss
-- 内网 IP（192.168.x / 10.x / 172.16.x）完全跳过检测
+- 内网 IP（RFC 1918 / loopback / link-local）完全跳过检测
 
 ## 部署
 
@@ -314,3 +314,11 @@ volumes:
 | 安全页「🤖 AI 审查」| 批量审查当前告警，自动 dismiss 误报，支持选择模型 |
 
 不需要此功能可忽略 `OPENROUTER_*` 配置项，仅 AI 相关按钮会报错，其余功能不受影响。
+
+## 安全加固
+
+- **SSH 操作**：使用 `sshpass -f` 临时密码文件（0600 权限），不再在命令行明文传递密码；`subprocess` 以列表参数调用，禁止 shell 注入
+- **文件服务**：`/sub/<filename>` 路由对解析后的路径做 `resolve()` + 边界校验，防止路径穿越
+- **认证**：Basic Auth 使用 `hmac.compare_digest()` 常量时间比较，记录失败日志
+- **响应头**：自动添加 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy`
+- **前端**：消除所有 inline `onclick` 事件处理器，改用 `data-*` 属性 + 事件委托，避免 XSS
