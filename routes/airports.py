@@ -32,8 +32,15 @@ import config
 
 bp = Blueprint("airports", __name__)
 log = logging.getLogger("airports")
-rds = _redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT,
-                   db=config.REDIS_DB, decode_responses=True)
+_rds = None
+
+
+def _get_redis():
+    global _rds
+    if _rds is None:
+        _rds = _redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT,
+                            db=config.REDIS_DB, decode_responses=True)
+    return _rds
 
 SUB_STORE = Path(config.SUB_STORE_PATH)
 AIRPORTS_JSON = SUB_STORE / "airports.json"
@@ -697,7 +704,7 @@ def airport_entry_ip():
     """Resolve entry IPs for each airport and return geolocation + relay/direct tag."""
     force = request.args.get("refresh") == "1"
     if not force:
-        cached = rds.get(_ENTRY_CACHE_KEY)
+        cached = _get_redis().get(_ENTRY_CACHE_KEY)
         if cached:
             return Response(cached, mimetype="application/json")
 
@@ -779,5 +786,5 @@ def airport_entry_ip():
             "entries": entries,
         }
 
-    rds.setex(_ENTRY_CACHE_KEY, _ENTRY_CACHE_TTL, json.dumps(result, ensure_ascii=False))
+    _get_redis().setex(_ENTRY_CACHE_KEY, _ENTRY_CACHE_TTL, json.dumps(result, ensure_ascii=False))
     return jsonify(result)

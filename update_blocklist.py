@@ -76,6 +76,19 @@ def update_source(db, src):
     log.info(f"{src['name']}: {len(domains)} domains parsed")
 
     unique_domains = list(dict.fromkeys(domains))
+
+    # Safety check: if new list is suspiciously small compared to existing,
+    # skip update to prevent accidental blocklist wipe (e.g. partial download)
+    with db.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS cnt FROM domain_blocklist WHERE source=%s", (src["name"],))
+        existing_count = cur.fetchone()["cnt"]
+    if existing_count > 1000 and len(unique_domains) < existing_count * 0.5:
+        log.warning(
+            "%s: new list (%d) is <50%% of existing (%d), skipping to prevent data loss",
+            src["name"], len(unique_domains), existing_count,
+        )
+        return 0
+
     batch = 2000
     total = 0
     sql = (

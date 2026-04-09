@@ -14,6 +14,7 @@ import ipaddress
 import threading
 from datetime import date, datetime, timedelta
 
+import requests as _req
 from db import get_db
 
 log = logging.getLogger("detector")
@@ -86,7 +87,6 @@ def _get_asn_info(ip, db):
         pass
 
     try:
-        import requests as _req
         resp = _req.get(
             f"http://ip-api.com/json/{ip}?fields=status,country,org,as",
             timeout=5,
@@ -116,11 +116,12 @@ def _get_asn_info(ip, db):
 
 # ─── Safe domain exclusions ───────────────────────────────────────────────────
 
-# Exact match safe domains (lowercase)
-SAFE_DOMAINS = {
+# Unified safe domain set: both exact matches and suffix matches.
+# A host is safe if it equals any entry OR ends with ".<entry>".
+_SAFE_DOMAIN_SET = frozenset({
     # Apple
     "apple.com", "icloud.com", "mzstatic.com", "apple-cloudkit.com",
-    "appleiphonecell.com", "courier.push.apple.com", "itunes.apple.com",
+    "appleiphonecell.com",
     # Google
     "google.com", "googleapis.com", "gstatic.com", "googleusercontent.com",
     "googlevideo.com", "youtube.com", "ytimg.com", "ggpht.com",
@@ -136,30 +137,31 @@ SAFE_DOMAINS = {
     "akamaiedge.net", "akamaized.net", "akamaistream.net",
     "fastly.net", "fastlylb.net",
     "cloudflare.com", "cloudflare-dns.com",
-    "cdn.jsdelivr.net", "jsdelivr.net",
-    "unpkg.com", "cdnjs.cloudflare.com",
+    "jsdelivr.net", "unpkg.com",
     # Social / Communication
     "facebook.com", "fbcdn.net", "instagram.com", "whatsapp.com", "whatsapp.net",
     "twitter.com", "twimg.com", "t.co",
     "telegram.org", "t.me",
-    "wechat.com", "weixin.qq.com", "wx.qq.com",
+    "wechat.com",
     # Alibaba / Tencent / Baidu (Chinese)
     "taobao.com", "tmall.com", "alipay.com", "aliyun.com", "alicdn.com",
     "alidns.com", "alibaba.com", "alibabacloud.com", "tbcdn.cn",
     "tencent.com", "qq.com", "qpic.cn", "qlogo.cn", "gtimg.com",
+    "myqcloud.com", "qcloud.com",
     "baidu.com", "bdstatic.com", "baidustatic.com",
     "jd.com", "jdcloud.com",
     "meituan.com", "eleme.cn",
-    "xiaomi.com", "mi.com", "miui.com", "io.mi.com",
+    "xiaomi.com", "mi.com", "miui.com",
     "bilibili.com", "hdslb.com",
-    "iqiyi.com", "youku.com",
+    "iqiyi.com", "youku.com", "iqiyipic.com", "qiyipic.com",
+    "mgtv.com", "hunantv.com",
     "weibo.com", "sinaimg.cn", "sina.com.cn",
-    "163.com", "126.com", "netease.com",
+    "163.com", "126.com", "netease.com", "ndmdhs.com",
     "zhihu.com",
     "bytedance.com", "toutiao.com", "douyin.com", "snssdk.com", "isnssdk.com",
+    "kuaishou.com", "gifshow.com",
     # Security / DNS
-    "digicert.com", "ocsp.apple.com", "crl.apple.com",
-    "letsencrypt.org", "sectigo.com", "comodoca.com",
+    "digicert.com", "letsencrypt.org", "sectigo.com", "comodoca.com",
     "1.1.1.1", "8.8.8.8", "114.114.114.114", "223.5.5.5",
     # Misc common
     "github.com", "githubusercontent.com", "githubassets.com",
@@ -170,7 +172,7 @@ SAFE_DOMAINS = {
     "ubuntu.com", "debian.org", "centos.org",
     "docker.com", "dockerhub.com",
     "openrouter.ai", "openai.com", "anthropic.com",
-    "ntp.org", "pool.ntp.org",
+    "ntp.org",
     "home-assistant.io",
     "app.link", "app.goo.gl",
     "reddit.com", "redd.it",
@@ -183,50 +185,15 @@ SAFE_DOMAINS = {
     "zoom.us",
     "vercel.app", "vercel.com", "netlify.app", "netlify.com",
     "supabase.co", "supabase.com",
-}
-
-# Safe domain suffixes (match if host ends with these)
-SAFE_SUFFIXES = (
-    ".apple.com", ".icloud.com", ".mzstatic.com",
-    ".google.com", ".googleapis.com", ".gstatic.com", ".googlevideo.com",
-    ".youtube.com", ".ytimg.com",
-    ".microsoft.com", ".windows.com", ".live.com", ".azure.com", ".msedge.net",
-    ".amazon.com", ".amazonaws.com", ".cloudfront.net",
-    ".akamaiedge.net", ".akamaized.net", ".fastly.net",
-    ".cloudflare.com",
-    ".facebook.com", ".fbcdn.net", ".instagram.com", ".whatsapp.com", ".whatsapp.net",
-    ".twitter.com", ".twimg.com",
-    ".telegram.org",
-    ".qq.com", ".weixin.qq.com", ".tencent.com", ".qpic.cn", ".gtimg.com",
-    ".myqcloud.com", ".qcloud.com",
-    ".baidu.com", ".bdstatic.com",
-    ".taobao.com", ".tmall.com", ".alipay.com", ".aliyun.com", ".alicdn.com",
-    ".alibaba.com", ".tbcdn.cn",
-    ".jd.com",
-    ".xiaomi.com", ".mi.com", ".miui.com",
-    ".bilibili.com", ".hdslb.com",
-    ".mgtv.com", ".hunantv.com",
-    ".bytedance.com", ".toutiao.com", ".douyin.com", ".snssdk.com",
-    ".163.com", ".126.com", ".netease.com",
-    ".github.com", ".githubusercontent.com",
-    ".letsencrypt.org",
-    ".home-assistant.io",
-    ".plex.direct", ".plex.tv",
-    ".synology.com", ".synology.me",
-    ".ndmdhs.com",  # Netease DRM
-    # App deep links
-    ".app.link", ".app.goo.gl",
+    "plex.direct", "plex.tv",
+    "synology.com", "synology.me",
     # Chinese cloud / CDN
-    ".huaweicloud.com", ".hwcloudtest.cn", ".volcengine.com", ".volces.com",
-    ".ctyun.cn", ".ucloud.cn",
-    ".cdn20.com", ".kunlunsl.com", ".chinanetcenter.com",
-    # Gaming / streaming
-    ".mihoyo.com", ".hoyoverse.com",
-    ".kuaishou.com", ".gifshow.com",
-    ".iqiyipic.com", ".qiyipic.com",
-)
-_SAFE_DOMAIN_SET = frozenset(SAFE_DOMAINS)
-_SAFE_SUFFIX_SET = frozenset(s.lstrip(".") for s in SAFE_SUFFIXES)
+    "huaweicloud.com", "hwcloudtest.cn", "volcengine.com", "volces.com",
+    "ctyun.cn", "ucloud.cn",
+    "cdn20.com", "kunlunsl.com", "chinanetcenter.com",
+    # Gaming
+    "mihoyo.com", "hoyoverse.com",
+})
 
 # Suspicious TLDs — only truly abused free/cheap TLDs
 # Removed: .work .link .live .vip .club .cc (too many legitimate uses)
@@ -263,13 +230,14 @@ def _parse_ip_literal(host):
 
 
 def _is_safe(host):
-    """Return True if host should be skipped (known safe)."""
+    """Return True if host should be skipped (known safe).
+
+    Matches if host equals any entry in _SAFE_DOMAIN_SET or is a subdomain of one.
+    """
     h = _strip_port(host).lower().rstrip(".")
-    if h in _SAFE_DOMAIN_SET:
-        return True
     labels = h.split(".")
     for i in range(len(labels)):
-        if ".".join(labels[i:]) in _SAFE_SUFFIX_SET:
+        if ".".join(labels[i:]) in _SAFE_DOMAIN_SET:
             return True
     return False
 
@@ -379,6 +347,9 @@ def check_new_domains_heuristic(db, prefetched_rows=None):
         rows = prefetched_rows
 
     flagged = 0
+    trusted_batch = []
+    heuristic_batch = []
+
     for row in rows:
         host = row["remote_host"]
         if _is_safe(host):
@@ -387,22 +358,8 @@ def check_new_domains_heuristic(db, prefetched_rows=None):
         # Check trusted parent domain list (DB-managed whitelist)
         trusted, pattern = _is_trusted_parent(host, db)
         if trusted:
-            try:
-                with db.cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO suspicious_domains
-                            (host, detection_type, reason, severity,
-                             request_count, device_count, dismissed, dismissed_at, notes)
-                        VALUES (%s, 'heuristic', '信任域名自动白名单', 'low',
-                                %s, %s, 1, NOW(), %s)
-                        AS new
-                        ON DUPLICATE KEY UPDATE last_seen=NOW(),
-                            request_count=request_count + new.request_count
-                    """, (host, row["req_count"], row["dev_count"],
-                          f"[自动白名单] 信任域名: {pattern}"))
-                db.commit()
-            except Exception:
-                pass
+            trusted_batch.append((host, row["req_count"], row["dev_count"],
+                                  f"[自动白名单] 信任域名: {pattern}"))
             continue
 
         severity, reason = _check_heuristics(host)
@@ -421,9 +378,30 @@ def check_new_domains_heuristic(db, prefetched_rows=None):
                     auto_dismiss = True
                     auto_notes = f"[自动白名单] 信任机构: {asn_info['org']} ({asn_info['asn']})"
 
-        try:
+        heuristic_batch.append((host, reason, severity, row["req_count"], row["dev_count"],
+                                int(auto_dismiss), int(auto_dismiss), auto_notes))
+        if not auto_dismiss:
+            flagged += 1
+            log.info(f"heuristic flagged [{severity}] {host}: {reason}")
+        else:
+            log.info(f"heuristic auto-dismissed [{severity}] {host}: {auto_notes}")
+
+    try:
+        if trusted_batch:
             with db.cursor() as cur:
-                cur.execute("""
+                cur.executemany("""
+                    INSERT INTO suspicious_domains
+                        (host, detection_type, reason, severity,
+                         request_count, device_count, dismissed, dismissed_at, notes)
+                    VALUES (%s, 'heuristic', '信任域名自动白名单', 'low',
+                            %s, %s, 1, NOW(), %s)
+                    AS new
+                    ON DUPLICATE KEY UPDATE last_seen=NOW(),
+                        request_count=request_count + new.request_count
+                """, trusted_batch)
+        if heuristic_batch:
+            with db.cursor() as cur:
+                cur.executemany("""
                     INSERT INTO suspicious_domains
                         (host, detection_type, reason, severity,
                          request_count, device_count, dismissed, dismissed_at, notes)
@@ -434,16 +412,10 @@ def check_new_domains_heuristic(db, prefetched_rows=None):
                         last_seen=NOW(),
                         request_count=request_count + new.request_count,
                         device_count=GREATEST(device_count, new.device_count)
-                """, (host, reason, severity, row["req_count"], row["dev_count"],
-                      int(auto_dismiss), int(auto_dismiss), auto_notes))
-            db.commit()
-            if auto_dismiss:
-                log.info(f"heuristic auto-dismissed [{severity}] {host}: {auto_notes}")
-            else:
-                flagged += 1
-                log.info(f"heuristic flagged [{severity}] {host}: {reason}")
-        except Exception as e:
-            log.warning(f"failed to insert heuristic flag for {host}: {e}")
+                """, heuristic_batch)
+        db.commit()
+    except Exception as e:
+        log.warning(f"failed to batch insert heuristic flags: {e}")
 
     return flagged
 
@@ -490,30 +462,16 @@ def check_domains_blocklist(db, prefetched_rows=None):
 
     count = 0
     flagged_hosts = set()
+    insert_batch = []
+
     for m in matches:
         row = host_map[m["domain"]]
         host = row["remote_host"]
         flagged_hosts.add(m["domain"])
-        try:
-            with db.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO suspicious_domains
-                        (host, detection_type, reason, severity, request_count, device_count)
-                    VALUES (%s, 'blocklist', %s, %s, %s, %s)
-                    AS new
-                    ON DUPLICATE KEY UPDATE
-                        last_seen=NOW(),
-                        reason=new.reason,
-                        severity=GREATEST(severity, new.severity),
-                        request_count=GREATEST(request_count, new.request_count),
-                        device_count=GREATEST(device_count, new.device_count)
-                """, (host, m["reason"], m["severity"],
-                      int(row["req_count"]), int(row["dev_count"])))
-            db.commit()
-            count += 1
-            log.info(f"blocklist flagged [{m['severity']}] {host}: {m['reason']}")
-        except Exception as e:
-            log.warning(f"failed to insert blocklist flag for {host}: {e}")
+        insert_batch.append((host, m["reason"], m["severity"],
+                             int(row["req_count"]), int(row["dev_count"])))
+        count += 1
+        log.info(f"blocklist flagged [{m['severity']}] {host}: {m['reason']}")
 
     # Suffix matching: check parent domains of unflagged hosts
     parent_map = {}  # parent_domain -> [(stripped_domain, original_row)]
@@ -545,26 +503,29 @@ def check_domains_blocklist(db, prefetched_rows=None):
                 flagged_hosts.add(stripped)
                 host = row["remote_host"]
                 reason = f"{m['reason']}（父域名 {m['domain']} 命中黑名单）"
-                try:
-                    with db.cursor() as cur:
-                        cur.execute("""
-                            INSERT INTO suspicious_domains
-                                (host, detection_type, reason, severity, request_count, device_count)
-                            VALUES (%s, 'blocklist', %s, %s, %s, %s)
-                            AS new
-                            ON DUPLICATE KEY UPDATE
-                                last_seen=NOW(),
-                                reason=new.reason,
-                                severity=GREATEST(severity, new.severity),
-                                request_count=GREATEST(request_count, new.request_count),
-                                device_count=GREATEST(device_count, new.device_count)
-                        """, (host, reason, m["severity"],
-                              int(row["req_count"]), int(row["dev_count"])))
-                    db.commit()
-                    count += 1
-                    log.info(f"blocklist suffix flagged [{m['severity']}] {host}: {reason}")
-                except Exception as e:
-                    log.warning(f"failed to insert blocklist suffix flag for {host}: {e}")
+                insert_batch.append((host, reason, m["severity"],
+                                     int(row["req_count"]), int(row["dev_count"])))
+                count += 1
+                log.info(f"blocklist suffix flagged [{m['severity']}] {host}: {reason}")
+
+    if insert_batch:
+        try:
+            with db.cursor() as cur:
+                cur.executemany("""
+                    INSERT INTO suspicious_domains
+                        (host, detection_type, reason, severity, request_count, device_count)
+                    VALUES (%s, 'blocklist', %s, %s, %s, %s)
+                    AS new
+                    ON DUPLICATE KEY UPDATE
+                        last_seen=NOW(),
+                        reason=new.reason,
+                        severity=GREATEST(severity, new.severity),
+                        request_count=GREATEST(request_count, new.request_count),
+                        device_count=GREATEST(device_count, new.device_count)
+                """, insert_batch)
+            db.commit()
+        except Exception as e:
+            log.warning(f"failed to batch insert blocklist flags: {e}")
 
     return count
 

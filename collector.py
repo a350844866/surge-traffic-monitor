@@ -224,12 +224,14 @@ def scp_sqlite(remote_date_str):
     password_file = config.SURGE_SSH_PASS_FILE
     cleanup_password_file = False
     if not config.SURGE_SSH_KEY_PATH and not password_file and config.SURGE_SSH_PASS:
-        pw_tmp = tempfile.NamedTemporaryFile(mode="w", delete=False)
-        pw_tmp.write(config.SURGE_SSH_PASS)
-        pw_tmp.write("\n")
-        pw_tmp.close()
-        os.chmod(pw_tmp.name, 0o600)
-        password_file = pw_tmp.name
+        fd = os.open(
+            os.path.join(tempfile.gettempdir(), f"_ssh_pw_{os.getpid()}"),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600,
+        )
+        with os.fdopen(fd, "w") as f:
+            f.write(config.SURGE_SSH_PASS)
+            f.write("\n")
+        password_file = os.path.join(tempfile.gettempdir(), f"_ssh_pw_{os.getpid()}")
         cleanup_password_file = True
     if password_file and not config.SURGE_SSH_KEY_PATH:
         scp_cmd.extend([
