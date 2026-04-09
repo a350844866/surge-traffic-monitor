@@ -496,7 +496,13 @@ def refresh_airport(name):
         return jsonify({"error": f"airport '{name}' not found"}), 404
 
     info = airports[name]
-    url = info.get("subconverter_url") or _build_subconv_url(info["subscribe_url"])
+    data = request.get_json(silent=True) or {}
+    new_subscribe_url = data.get("subscribe_url", "").strip()
+
+    if new_subscribe_url:
+        url = _build_subconv_url(new_subscribe_url)
+    else:
+        url = info.get("subconverter_url") or _build_subconv_url(info["subscribe_url"])
     try:
         node_text = _fetch_nodes(url)
     except requests.exceptions.HTTPError as e:
@@ -515,9 +521,14 @@ def refresh_airport(name):
     fpath.write_text(node_text, "utf-8")
     os.chmod(str(fpath), 0o644)
 
+    if new_subscribe_url:
+        info["subscribe_url"] = new_subscribe_url
+        info["subconverter_url"] = url
+
     info["last_refreshed"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     _save_airports(airports)
-    return jsonify({"ok": True, "node_count": node_count})
+    return jsonify({"ok": True, "node_count": node_count,
+                     "url_updated": bool(new_subscribe_url)})
 
 
 # ── Node status via Surge API ─────────────────────────────────

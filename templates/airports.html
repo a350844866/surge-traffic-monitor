@@ -92,6 +92,39 @@
     </div>
   </div>
 </div>
+
+<!-- Update Subscribe URL Modal -->
+<div class="ai-modal-backdrop" id="update-url-backdrop">
+  <div class="ai-modal" style="width:min(520px,92vw)">
+    <div class="ai-modal-head">
+      <h4>更换订阅链接</h4>
+      <button class="ai-modal-close" onclick="closeUpdateUrlModal()">&#x2715;</button>
+    </div>
+    <div class="ai-modal-body" style="overflow:visible">
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">当前订阅链接</label>
+          <div id="update-url-current" style="font-size:12px;color:#64748b;font-family:monospace;
+            word-break:break-all;background:#0f1117;padding:8px 12px;border-radius:6px;
+            border:1px solid #1e293b"></div>
+        </div>
+        <div>
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">新订阅链接</label>
+          <input id="update-url-input" type="text" placeholder="https://..."
+            style="width:100%;background:#0f1117;border:1px solid #2d3148;color:#e2e8f0;
+                   padding:8px 12px;border-radius:6px;font-size:14px">
+        </div>
+        <div id="update-url-error" style="color:#f87171;font-size:13px;display:none"></div>
+        <button id="update-url-submit" onclick="submitUpdateUrl()"
+          style="background:#312e81;border:1px solid #6d28d9;color:#a5b4fc;
+                 padding:10px;border-radius:8px;font-size:14px;cursor:pointer;
+                 transition:all .15s">
+          更新并刷新节点
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -100,6 +133,7 @@ let airports = {};
 let nodeStatus = {};
 let entryInfo = {};
 let deletingName = '';
+let updatingName = '';
 
 async function loadAirports() {
   const el = document.getElementById('airport-list');
@@ -337,6 +371,7 @@ function renderAirports() {
         <div style="display:flex;gap:8px;align-items:center">
           ${s.total ? `<button id="toggle-${name}" onclick="toggleNodes('${name}')" class="range-btn" style="font-size:11px">展开节点</button>` : ''}
           <button onclick="refreshAirport('${name}')" class="range-btn" id="refresh-${name}">刷新节点</button>
+          <button onclick="showUpdateUrlModal('${name}')" class="range-btn" style="font-size:11px">更换订阅</button>
           <button onclick="showDelModal('${name}','${a.display_name||name}')"
             class="range-btn" style="border-color:#991b1b;color:#fca5a5">删除</button>
         </div>
@@ -464,6 +499,54 @@ async function confirmDelete() {
   }
   btn.disabled = false;
   btn.textContent = '删除';
+}
+
+function showUpdateUrlModal(name) {
+  updatingName = name;
+  const info = airports[name];
+  document.getElementById('update-url-current').textContent = info.subscribe_url || '(无)';
+  document.getElementById('update-url-input').value = '';
+  document.getElementById('update-url-error').style.display = 'none';
+  document.getElementById('update-url-submit').disabled = false;
+  document.getElementById('update-url-submit').textContent = '更新并刷新节点';
+  document.getElementById('update-url-backdrop').classList.add('open');
+}
+function closeUpdateUrlModal() {
+  document.getElementById('update-url-backdrop').classList.remove('open');
+  updatingName = '';
+}
+async function submitUpdateUrl() {
+  const url = document.getElementById('update-url-input').value.trim();
+  const errEl = document.getElementById('update-url-error');
+  const btn = document.getElementById('update-url-submit');
+  if (!url) {
+    errEl.textContent = '请输入新的订阅链接';
+    errEl.style.display = 'block';
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = '正在获取节点...';
+  errEl.style.display = 'none';
+  try {
+    const r = await fetch(`/api/airports/${updatingName}/refresh`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ subscribe_url: url }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      closeUpdateUrlModal();
+      loadAirports();
+    } else {
+      errEl.textContent = d.error || '更新失败';
+      errEl.style.display = 'block';
+    }
+  } catch(e) {
+    errEl.textContent = 'Error: ' + e;
+    errEl.style.display = 'block';
+  }
+  btn.disabled = false;
+  btn.textContent = '更新并刷新节点';
 }
 
 // Highlight nav
