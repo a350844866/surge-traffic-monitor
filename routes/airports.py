@@ -605,7 +605,7 @@ def airport_node_status():
 
 _entry_cache = {}
 _entry_cache_ts = 0
-_ENTRY_CACHE_TTL = 3600  # 1 hour
+_ENTRY_CACHE_TTL = 86400  # 24 hours
 
 
 def _parse_entry_hosts(node_text):
@@ -642,7 +642,8 @@ def _resolve_via_doh(hostname):
 def airport_entry_ip():
     """Resolve entry IPs for each airport and return geolocation + relay/direct tag."""
     global _entry_cache, _entry_cache_ts
-    if time.time() - _entry_cache_ts < _ENTRY_CACHE_TTL and _entry_cache:
+    force = request.args.get("refresh") == "1"
+    if not force and time.time() - _entry_cache_ts < _ENTRY_CACHE_TTL and _entry_cache:
         return jsonify(_entry_cache)
 
     airports = _load_airports()

@@ -4,7 +4,10 @@
 {% block content %}
 <div class="page-header">
   <h1 class="page-title">机场管理</h1>
-  <button class="ai-btn" onclick="showAddModal()">+ 添加机场</button>
+  <div style="display:flex;gap:8px">
+    <button id="refresh-entry-btn" class="range-btn" onclick="refreshEntryInfo()" style="font-size:12px">刷新入口数据</button>
+    <button class="ai-btn" onclick="showAddModal()">+ 添加机场</button>
+  </div>
 </div>
 
 <div id="airport-list" class="loading">加载中...</div>
@@ -109,14 +112,22 @@ async function loadAirports() {
     nodeStatus = statusRes.ok ? await statusRes.json() : {};
     renderAirports();
     populateInsertAfter();
-    // Load entry-ip in background (slower due to DNS + geo lookup)
-    fetch('/api/airports/entry-ip').then(r => r.ok ? r.json() : {}).then(d => {
-      entryInfo = d;
-      renderEntryBadges();
-    }).catch(e => console.warn('entry-ip fetch failed:', e));
+    // Load entry-ip cache (24h server-side cache, instant if warm)
+    loadEntryInfo();
   } catch(e) {
     el.innerHTML = '<p style="color:#f87171">加载失败</p>';
   }
+}
+
+async function loadEntryInfo(force) {
+  const url = '/api/airports/entry-ip' + (force ? '?refresh=1' : '');
+  try {
+    const r = await fetch(url);
+    if (r.ok) {
+      entryInfo = await r.json();
+      renderEntryBadges();
+    }
+  } catch(e) { console.warn('entry-ip fetch failed:', e); }
 }
 
 function renderEntryBadges() {
@@ -124,9 +135,18 @@ function renderEntryBadges() {
     const el = document.getElementById('entry-' + name);
     if (!el) continue;
     const info = entryInfo[name];
-    if (!info) continue;
+    if (!info) { el.innerHTML = ''; continue; }
     el.innerHTML = entryBadgeHtml(name, info);
   }
+  // Update refresh button state
+  const btn = document.getElementById('refresh-entry-btn');
+  if (btn) { btn.disabled = false; btn.textContent = '刷新入口数据'; }
+}
+
+async function refreshEntryInfo() {
+  const btn = document.getElementById('refresh-entry-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '分析中...'; }
+  await loadEntryInfo(true);
 }
 
 function entryBadgeHtml(name, info) {
