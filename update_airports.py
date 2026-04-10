@@ -58,14 +58,16 @@ def _fetch_nodes(subconv_url):
     return "\n".join(lines) + "\n"
 
 
-def _fetch_nodes_via_proxy(raw_url):
-    """Pre-download subscription ourselves (clean headers), then convert via subconverter."""
+def _fetch_nodes_via_proxy(raw_url, airport_name="tmp"):
+    """Pre-download subscription ourselves (clean headers), then convert via subconverter.
+    Uses per-airport temp files to avoid subconverter URL caching issues."""
     resp = requests.get(raw_url, timeout=30,
                         headers={"User-Agent": "clash-verge/v2.2.3"})
     resp.raise_for_status()
-    temp_path = SUB_STORE / "_temp_raw.txt"
+    temp_name = f"_temp_raw_{airport_name}.txt"
+    temp_path = SUB_STORE / temp_name
     temp_path.write_text(resp.text, "utf-8")
-    local_url = f"{_LOCAL_SUB_BASE}/_temp_raw.txt"
+    local_url = f"{_LOCAL_SUB_BASE}/{temp_name}"
     return _fetch_nodes(_build_subconv_url(local_url))
 
 
@@ -95,7 +97,7 @@ def main():
             if raw_url:
                 log.info("%s: direct fetch failed, retrying via proxy download", name)
                 try:
-                    node_text = _fetch_nodes_via_proxy(raw_url)
+                    node_text = _fetch_nodes_via_proxy(raw_url, name)
                 except Exception as e:
                     log.warning("%s: proxy fallback also failed - %s", name, e)
                     continue
