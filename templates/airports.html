@@ -346,8 +346,10 @@ function renderAirports() {
     const s = nodeStatus[name] || {};
     const mtime = a.file_mtime ? new Date(a.file_mtime * 1000).toLocaleString('zh-CN') : '-';
     const autoTag = a.auto_update
-      ? '<span style="color:#34d399;font-size:11px">自动更新</span>'
-      : '<span style="color:#64748b;font-size:11px">手动</span>';
+      ? `<span onclick="toggleAutoUpdate('${name}',false)" style="color:#34d399;font-size:11px;cursor:pointer;
+          border:1px solid #065f46;padding:1px 6px;border-radius:4px" title="点击关闭自动更新">自动更新</span>`
+      : `<span onclick="toggleAutoUpdate('${name}',true)" style="color:#64748b;font-size:11px;cursor:pointer;
+          border:1px solid #374151;padding:1px 6px;border-radius:4px" title="点击开启自动更新">手动</span>`;
 
     html += `
     <div class="panel" style="padding-bottom:12px">
@@ -547,6 +549,22 @@ async function submitUpdateUrl() {
   }
   btn.disabled = false;
   btn.textContent = '更新并刷新节点';
+}
+
+async function toggleAutoUpdate(name, enabled) {
+  try {
+    const r = await fetch(`/api/airports/${name}/auto-update`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ auto_update: enabled }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      airports[name].auto_update = d.auto_update;
+      renderAirports();
+      renderEntryBadges();
+    }
+  } catch(e) { console.warn('toggle auto_update failed:', e); }
 }
 
 // Highlight nav

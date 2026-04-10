@@ -571,6 +571,17 @@ def refresh_airport(name):
                      "url_updated": bool(new_subscribe_url)})
 
 
+@bp.route("/api/airports/<name>/auto-update", methods=["POST"])
+def toggle_auto_update(name):
+    airports = _load_airports()
+    if name not in airports:
+        return jsonify({"error": f"airport '{name}' not found"}), 404
+    data = request.get_json(silent=True) or {}
+    airports[name]["auto_update"] = bool(data.get("auto_update", False))
+    _save_airports(airports)
+    return jsonify({"ok": True, "auto_update": airports[name]["auto_update"]})
+
+
 # ── Node status via Surge API ─────────────────────────────────
 SURGE_API = f"http://127.0.0.1:{config.SURGE_API_LOCAL_PORT}"
 SURGE_HEADERS = {"X-Key": config.SURGE_API_KEY}
